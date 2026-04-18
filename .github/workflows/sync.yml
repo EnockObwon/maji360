@@ -8,6 +8,12 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      MWATER_CLIENT_KEY: ${{ secrets.MWATER_CLIENT_KEY }}
+      MWATER_V3_BASE: ${{ secrets.MWATER_V3_BASE }}
+      ACCOUNTS_CLIENT_KEY: ${{ secrets.ACCOUNTS_CLIENT_KEY }}
+      ACCOUNTS_BASE: ${{ secrets.ACCOUNTS_BASE }}
 
     steps:
       - name: Checkout repository
@@ -19,14 +25,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install requests sqlalchemy psycopg2-binary bcrypt streamlit
+        run: pip install requests sqlalchemy psycopg2-binary bcrypt streamlit
 
       - name: Run Maji360 sync
-        env:
-          DATABASE_URL:        ${{ secrets.DATABASE_URL }}
-          MWATER_CLIENT_KEY:   ${{ secrets.MWATER_CLIENT_KEY }}
-          MWATER_V3_BASE:      ${{ secrets.MWATER_V3_BASE }}
-          ACCOUNTS_CLIENT_KEY: ${{ secrets.ACCOUNTS_CLIENT_KEY }}
-          ACCOUNTS_BASE:       ${{ secrets.ACCOUNTS_BASE }}
         run: python scheduler/run_sync.py
