@@ -1,23 +1,17 @@
 # ── Maji360 · core/sync.py ─────────────────────────────
-# Sync engine — used by both dashboard button
-# and GitHub Actions scheduler
-
 import requests
 import json
-import streamlit as st
 from datetime import datetime, timezone
 from collections import defaultdict
-from sqlalchemy import text
-from core.database import get_session, get_engine
 from core.database import (
-    WaterSystem, DailyReading, Bill,
-    Customer, NRWRecord
+    get_session, WaterSystem, DailyReading,
+    Bill, Customer, NRWRecord
 )
 
 
-# ── mWater config ──────────────────────────────────────
 def get_mwater_config():
     try:
+        import streamlit as st
         return {
             "client_key":    st.secrets["MWATER_CLIENT_KEY"],
             "v3_base":       st.secrets["MWATER_V3_BASE"],
@@ -27,11 +21,11 @@ def get_mwater_config():
     except Exception:
         import os
         return {
-            "client_key":    os.environ.get("MWATER_CLIENT_KEY"),
+            "client_key":    os.environ.get("MWATER_CLIENT_KEY", ""),
             "v3_base":       os.environ.get("MWATER_V3_BASE",
                              "https://api.mwater.co/v3"),
-            "accounts_key":  os.environ.get("ACCOUNTS_CLIENT_KEY"),
-            "accounts_base": os.environ.get("ACCOUNTS_BASE"),
+            "accounts_key":  os.environ.get("ACCOUNTS_CLIENT_KEY", ""),
+            "accounts_base": os.environ.get("ACCOUNTS_BASE", ""),
         }
 
 
@@ -46,38 +40,15 @@ def safe_float(val):
         return None
 
 
-def parse_date(val):
-    if val is None:
-        return None
-    if isinstance(val, dict):
-        val = val.get("value")
-    if not val:
-        return None
-    try:
-        return datetime.fromisoformat(
-            str(val).replace("Z", "+00:00")
-        )
-    except Exception:
-        return None
-
-
-# ── Field IDs for Karungu WSS form ────────────────────
 FIELD_IDS = {
-    "pump_start":   "7411292765fa4fb7a0217bfb001ab167",
-    "pump_end":     "3456b8d568fe46b49dd0843a58cdc143",
-    "tank_start":   "f1c488eb7ec248a8a6d1208ba8f4b06a",
-    "tank_end":     "9cae2fe4ea6b4940bb800253123b7565",
-    "start_time":   "cfbc34a9c6bc4604837ecb2c996b9f6d",
-    "pipes_leak":   "f6eeb2aa61f143e1a39d1c27c87191ea",
-    "tank_leak":    "35380c9c04dd4afeb1680177ce266335",
+    "pump_start": "7411292765fa4fb7a0217bfb001ab167",
+    "pump_end":   "3456b8d568fe46b49dd0843a58cdc143",
+    "tank_start": "f1c488eb7ec248a8a6d1208ba8f4b06a",
+    "tank_end":   "9cae2fe4ea6b4940bb800253123b7565",
 }
 
+
 def sync_system(system_id: int, log: list = None) -> dict:
-    """
-    Full sync for one water system.
-    Returns dict with counts of new records added.
-    Appends progress messages to log list if provided.
-    """
     def log_msg(msg: str):
         if log is not None:
             log.append(msg)
@@ -92,8 +63,10 @@ def sync_system(system_id: int, log: list = None) -> dict:
         session.close()
         return {"error": "System not found"}
 
-    form_id  = system.mwater_form_id
-    log_msg(f"Syncing {system.name}...")
+    system_name = system.name
+    form_id     = system.mwater_form_id
+
+    log_msg(f"Syncing {system_name}...")
     log_msg(f"Form ID: {form_id}")
 
     # ── Fetch all mWater responses ─────────────────────
@@ -159,15 +132,11 @@ def sync_system(system_id: int, log: list = None) -> dict:
 
         data = r.get("data", {})
 
-        # Parse pump readings
         ps = safe_float(data.get(FIELD_IDS["pump_start"]))
         pe = safe_float(data.get(FIELD_IDS["pump_end"]))
-
-        # Parse tank readings
         ts = safe_float(data.get(FIELD_IDS["tank_start"]))
         te = safe_float(data.get(FIELD_IDS["tank_end"]))
 
-        # Get date
         submitted = r.get("submittedOn", "")
         try:
             reading_date = datetime.fromisoformat(
@@ -176,7 +145,6 @@ def sync_system(system_id: int, log: list = None) -> dict:
         except Exception:
             reading_date = datetime.now(timezone.utc)
 
-        # Calculate volumes
         pumped   = round(pe - ps, 2) \
                    if ps is not None and pe is not None \
                    and pe > ps else 0.0
@@ -209,17 +177,15 @@ def sync_system(system_id: int, log: list = None) -> dict:
     log_msg(f"New tank readings : {new_tank}")
     log_msg(f"Duplicates skipped: {duplicates}")
 
-    # ── Sync billing transactions ──────────────────────
+    # ── Sync billing ───────────────────────────────────
     log_msg("Syncing billing transactions...")
     new_bills = sync_billing(system_id, session, cfg, log)
     log_msg(f"New bills synced  : {new_bills}")
 
-    # ── Recalculate NRW for current month ──────────────
-    current_month = datetime.now().strftime("%Y-%m")
-    log_msg(f"Recalculating NRW for {current_month}...")
+    # ── Recalculate NRW ────────────────────────────────
+    log_msg("Recalculating NRW...")
     recalculate_nrw(system_id, session)
 
-   system_name = system.name
     session.close()
 
     log_msg("✓ Sync complete.")
@@ -232,9 +198,9 @@ def sync_system(system_id: int, log: list = None) -> dict:
         "synced_at":  datetime.now(timezone.utc).isoformat()
     }
 
+
 def sync_billing(system_id: int, session,
                   cfg: dict, log: list) -> int:
-    """Sync billing transactions from mWater Accounts."""
     def log_msg(msg):
         if log is not None:
             log.append(msg)
@@ -245,7 +211,6 @@ def sync_billing(system_id: int, session,
         return 0
 
     try:
-        # Fetch all transactions
         all_txns = []
         skip     = 0
         while True:
@@ -268,29 +233,31 @@ def sync_billing(system_id: int, session,
                 break
             skip += 50
 
-        # Fetch customer accounts mapping
         r2 = requests.get(
             f"{cfg['accounts_base']}/customer_accounts",
-            params={"client": cfg["accounts_key"], "limit": 50},
+            params={"client": cfg["accounts_key"],
+                    "limit": 50},
             timeout=15
         )
-        cust_accounts = r2.json() if r2.status_code == 200 else []
+        cust_accounts = r2.json() \
+                        if r2.status_code == 200 else []
 
         r3 = requests.get(
             f"{cfg['accounts_base']}/customers",
-            params={"client": cfg["accounts_key"], "limit": 50},
+            params={"client": cfg["accounts_key"],
+                    "limit": 50},
             timeout=15
         )
         mw_customers = {
             c["_id"]: c.get("code")
-            for c in (r3.json() if r3.status_code == 200 else [])
+            for c in (r3.json()
+                      if r3.status_code == 200 else [])
         }
 
-        # Build account → KR code mapping
         acc_to_kr = {}
         for ca in cust_accounts:
-            cust_id  = ca.get("customer", "")
-            kr_code  = mw_customers.get(cust_id, "")
+            cust_id       = ca.get("customer", "")
+            kr_code       = mw_customers.get(cust_id, "")
             acc_to_kr[ca["_id"]] = kr_code
 
         KR_TO_METER = {
@@ -306,7 +273,6 @@ def sync_billing(system_id: int, session,
             "KR10": "659280891",
         }
 
-        # Payment bill IDs
         payment_txns = [
             t for t in all_txns
             if t.get("meter_volume") is None
@@ -353,7 +319,6 @@ def sync_billing(system_id: int, session,
             ).first()
 
             if existing:
-                # Update payment status if changed
                 if existing.is_paid != is_paid:
                     existing.is_paid = is_paid
                 continue
@@ -378,15 +343,13 @@ def sync_billing(system_id: int, session,
 
 
 def recalculate_nrw(system_id: int, session) -> None:
-    """Recalculate NRW for all months with data."""
-    from collections import defaultdict
-
     readings = session.query(DailyReading).filter_by(
         system_id=system_id
     ).all()
 
-    monthly = defaultdict(lambda: {"pumped": 0.0,
-                                    "consumed": 0.0})
+    monthly = defaultdict(
+        lambda: {"pumped": 0.0, "consumed": 0.0}
+    )
     for r in readings:
         month = r.reading_date.strftime("%Y-%m")
         if r.water_produced_m3 and r.water_produced_m3 > 0:
