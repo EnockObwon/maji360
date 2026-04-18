@@ -72,7 +72,6 @@ FIELD_IDS = {
     "tank_leak":    "35380c9c04dd4afeb1680177ce266335",
 }
 
-
 def sync_system(system_id: int, log: list = None) -> dict:
     """
     Full sync for one water system.
@@ -220,18 +219,18 @@ def sync_system(system_id: int, log: list = None) -> dict:
     log_msg(f"Recalculating NRW for {current_month}...")
     recalculate_nrw(system_id, session)
 
+   system_name = system.name
     session.close()
 
     log_msg("✓ Sync complete.")
     return {
-        "system":     system.name,
+        "system":     system_name,
         "new_pump":   new_pump,
         "new_tank":   new_tank,
         "new_bills":  new_bills,
         "duplicates": duplicates,
         "synced_at":  datetime.now(timezone.utc).isoformat()
     }
-
 
 def sync_billing(system_id: int, session,
                   cfg: dict, log: list) -> int:
