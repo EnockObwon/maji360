@@ -7,3 +7,4 @@ streamlit-folium
 africastalking
 bcrypt
 requests
+psycopg2-binary
