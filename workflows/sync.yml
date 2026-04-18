@@ -2,9 +2,8 @@ name: Maji360 Daily Sync
 
 on:
   schedule:
-    # Runs at 03:00 UTC = 06:00 Uganda time (EAT = UTC+3)
     - cron: '0 3 * * *'
-  workflow_dispatch:  # allows manual trigger from GitHub
+  workflow_dispatch:
 
 jobs:
   sync:
@@ -21,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests sqlalchemy psycopg2-binary bcrypt
+          pip install requests sqlalchemy psycopg2-binary bcrypt streamlit
 
       - name: Run Maji360 sync
         env:
@@ -30,41 +29,4 @@ jobs:
           MWATER_V3_BASE:      ${{ secrets.MWATER_V3_BASE }}
           ACCOUNTS_CLIENT_KEY: ${{ secrets.ACCOUNTS_CLIENT_KEY }}
           ACCOUNTS_BASE:       ${{ secrets.ACCOUNTS_BASE }}
-        run: |
-          python - <<'EOF'
-          import os, sys
-          sys.path.insert(0, ".")
-
-          # Patch st.secrets to use environment variables
-          import types
-          import streamlit as st
-
-          class EnvSecrets:
-              def get(self, key, default=None):
-                  return os.environ.get(key, default)
-              def __getitem__(self, key):
-                  return os.environ[key]
-
-          st.secrets = EnvSecrets()
-
-          from core.sync import sync_system
-          from core.database import get_session, WaterSystem
-
-          session = get_session()
-          systems = session.query(WaterSystem).filter_by(
-              is_active=True
-          ).all()
-          session.close()
-
-          print(f"Found {len(systems)} active systems")
-
-          for system in systems:
-              print(f"\nSyncing: {system.name}")
-              log     = []
-              results = sync_system(system.id, log)
-              for line in log:
-                  print(f"  {line}")
-              print(f"Result: {results}")
-
-          print("\n✓ All systems synced successfully")
-          EOF
+        run: python scheduler/run_sync.py
