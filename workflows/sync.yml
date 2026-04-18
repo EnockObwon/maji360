@@ -1,0 +1,70 @@
+name: Maji360 Daily Sync
+
+on:
+  schedule:
+    # Runs at 03:00 UTC = 06:00 Uganda time (EAT = UTC+3)
+    - cron: '0 3 * * *'
+  workflow_dispatch:  # allows manual trigger from GitHub
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests sqlalchemy psycopg2-binary bcrypt
+
+      - name: Run Maji360 sync
+        env:
+          DATABASE_URL:        ${{ secrets.DATABASE_URL }}
+          MWATER_CLIENT_KEY:   ${{ secrets.MWATER_CLIENT_KEY }}
+          MWATER_V3_BASE:      ${{ secrets.MWATER_V3_BASE }}
+          ACCOUNTS_CLIENT_KEY: ${{ secrets.ACCOUNTS_CLIENT_KEY }}
+          ACCOUNTS_BASE:       ${{ secrets.ACCOUNTS_BASE }}
+        run: |
+          python - <<'EOF'
+          import os, sys
+          sys.path.insert(0, ".")
+
+          # Patch st.secrets to use environment variables
+          import types
+          import streamlit as st
+
+          class EnvSecrets:
+              def get(self, key, default=None):
+                  return os.environ.get(key, default)
+              def __getitem__(self, key):
+                  return os.environ[key]
+
+          st.secrets = EnvSecrets()
+
+          from core.sync import sync_system
+          from core.database import get_session, WaterSystem
+
+          session = get_session()
+          systems = session.query(WaterSystem).filter_by(
+              is_active=True
+          ).all()
+          session.close()
+
+          print(f"Found {len(systems)} active systems")
+
+          for system in systems:
+              print(f"\nSyncing: {system.name}")
+              log     = []
+              results = sync_system(system.id, log)
+              for line in log:
+                  print(f"  {line}")
+              print(f"Result: {results}")
+
+          print("\n✓ All systems synced successfully")
+          EOF
