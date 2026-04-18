@@ -25,8 +25,7 @@ def show():
 
     session  = get_session()
     readings = session.query(DailyReading).filter(
-        DailyReading.system_id         == system_id,
-        DailyReading.water_produced_m3 > 0
+        DailyReading.system_id == system_id
     ).order_by(DailyReading.reading_date).all()
     session.close()
 
@@ -34,11 +33,21 @@ def show():
         st.info("No readings available yet.")
         return
 
+    # Fetch ALL readings separately — pump and tank
+    # are recorded on different visit days
+    session  = get_session()
+    all_readings = session.query(DailyReading).filter(
+        DailyReading.system_id == system_id
+    ).order_by(DailyReading.reading_date).all()
+    session.close()
+
     monthly = defaultdict(lambda: {"pumped": 0.0, "consumed": 0.0})
-    for r in readings:
+    for r in all_readings:
         month = r.reading_date.strftime("%Y-%m")
-        monthly[month]["pumped"]   += r.water_produced_m3 or 0
-        monthly[month]["consumed"] += r.water_consumed_m3 or 0
+        if r.water_produced_m3 and r.water_produced_m3 > 0:
+            monthly[month]["pumped"]   += r.water_produced_m3
+        if r.water_consumed_m3 and r.water_consumed_m3 > 0:
+            monthly[month]["consumed"] += r.water_consumed_m3
 
     months   = sorted(monthly.keys())
     pumped   = [round(monthly[m]["pumped"],   1) for m in months]
