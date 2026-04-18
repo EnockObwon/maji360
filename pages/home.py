@@ -57,10 +57,59 @@ def show():
         else: st.success("All customers are up to date.")
     with col_right:
         st.markdown("### Recent readings")
+
         session = get_session()
-        recent  = session.query(DailyReading).filter(DailyReading.system_id==system_id, DailyReading.water_produced_m3>0).order_by(DailyReading.reading_date.desc()).limit(8).all()
+
+        # Pump readings
+        pump_readings = session.query(DailyReading).filter(
+            DailyReading.system_id         == system_id,
+            DailyReading.water_produced_m3 > 0
+        ).order_by(
+            DailyReading.reading_date.desc()
+        ).limit(5).all()
+
+        # Tank readings
+        tank_readings = session.query(DailyReading).filter(
+            DailyReading.system_id         == system_id,
+            DailyReading.water_consumed_m3 > 0
+        ).order_by(
+            DailyReading.reading_date.desc()
+        ).limit(5).all()
+
         session.close()
-        if recent:
-            data = [{"Date": r.reading_date.strftime("%d %b %Y"), "Pump (m³)": r.water_produced_m3, "Tank (m³)": r.water_consumed_m3, "NRW (m³)": round((r.water_produced_m3 or 0)-(r.water_consumed_m3 or 0),1)} for r in recent]
-            st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
-        else: st.info("No readings available.")
+
+        st.markdown(
+            "<span style='font-size:13px;color:#64748b'>"
+            "💧 Pump house — last 5 readings</span>",
+            unsafe_allow_html=True
+        )
+        if pump_readings:
+            pump_data = [{
+                "Date":      r.reading_date.strftime("%d %b %Y"),
+                "Pumped m³": r.water_produced_m3
+            } for r in pump_readings]
+            st.dataframe(
+                pd.DataFrame(pump_data),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("No pump readings available.")
+
+        st.markdown(
+            "<span style='font-size:13px;color:#64748b'>"
+            "🏗️ Tank outlet — last 5 readings</span>",
+            unsafe_allow_html=True
+        )
+        if tank_readings:
+            tank_data = [{
+                "Date":       r.reading_date.strftime("%d %b %Y"),
+                "Consumed m³": r.water_consumed_m3
+            } for r in tank_readings]
+            st.dataframe(
+                pd.DataFrame(tank_data),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("No tank readings available.")
