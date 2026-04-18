@@ -1,0 +1,32 @@
+name: Maji360 Daily Sync
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests sqlalchemy psycopg2-binary bcrypt streamlit
+
+      - name: Run Maji360 sync
+        env:
+          DATABASE_URL:        ${{ secrets.DATABASE_URL }}
+          MWATER_CLIENT_KEY:   ${{ secrets.MWATER_CLIENT_KEY }}
+          MWATER_V3_BASE:      ${{ secrets.MWATER_V3_BASE }}
+          ACCOUNTS_CLIENT_KEY: ${{ secrets.ACCOUNTS_CLIENT_KEY }}
+          ACCOUNTS_BASE:       ${{ secrets.ACCOUNTS_BASE }}
+        run: python scheduler/run_sync.py
