@@ -46,10 +46,11 @@ def show():
             "account_no": c.account_no,
             "name":       c.name,
             "bills": [{
-                "bill_month": b.bill_month,
-                "units_m3":   b.units_m3 or 0,
-                "amount":     b.amount or 0,
-                "is_paid":    b.is_paid
+                "bill_month":  b.bill_month,
+                "units_m3":    b.units_m3 or 0,
+                "amount":      b.amount or 0,
+                "amount_paid": b.amount_paid or 0,
+                "is_paid":     b.is_paid
             } for b in c_bills]
         }
 
@@ -65,15 +66,15 @@ def show():
     for b in all_bills:
         if b.amount and b.bill_month:
             monthly_billed[b.bill_month] += b.amount
-            if b.is_paid:
-                monthly_paid[b.bill_month] += b.amount
+            if b.amount_paid:
+                monthly_paid[b.bill_month] += b.amount_paid
 
     months = sorted(monthly_billed.keys())
 
     # ── KPI row ────────────────────────────────────────
     total_billed      = sum(b.amount or 0 for b in all_bills)
     total_paid        = sum(
-        b.amount or 0 for b in all_bills if b.is_paid
+        b.amount_paid or 0 for b in all_bills
     )
     total_outstanding = total_billed - total_paid
     coll_rate         = round(
@@ -210,7 +211,7 @@ def show():
     for cid, info in cust_bill_map.items():
         billed = sum(b["amount"] for b in info["bills"])
         paid   = sum(
-            b["amount"] for b in info["bills"] if b["is_paid"]
+            b["amount_paid"] for b in info["bills"]
         )
         owed   = billed - paid
         rate   = round(
