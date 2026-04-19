@@ -182,6 +182,11 @@ def sync_system(system_id: int, log: list = None) -> dict:
     new_bills = sync_billing(system_id, session, cfg, log)
     log_msg(f"New bills synced  : {new_bills}")
 
+    # ── Sync expenses ──────────────────────────────────
+    log_msg("Syncing expenses...")
+    new_expenses = sync_expenses(system_id, session, cfg, log)
+    log_msg(f"New expenses synced: {new_expenses}")
+    
     # ── Recalculate NRW ────────────────────────────────
     log_msg("Recalculating NRW...")
     recalculate_nrw(system_id, session)
@@ -190,14 +195,14 @@ def sync_system(system_id: int, log: list = None) -> dict:
 
     log_msg("✓ Sync complete.")
     return {
-        "system":     system_name,
-        "new_pump":   new_pump,
-        "new_tank":   new_tank,
-        "new_bills":  new_bills,
-        "duplicates": duplicates,
-        "synced_at":  datetime.now(timezone.utc).isoformat()
+        "system":       system_name,
+        "new_pump":     new_pump,
+        "new_tank":     new_tank,
+        "new_bills":    new_bills,
+        "new_expenses": new_expenses,
+        "duplicates":   duplicates,
+        "synced_at":    datetime.now(timezone.utc).isoformat()
     }
-
 
 def sync_billing(system_id: int, session,
                   cfg: dict, log: list) -> int:
@@ -383,5 +388,116 @@ def recalculate_nrw(system_id: int, session) -> None:
                 nrw_m3         = nrw_m3,
                 nrw_percent    = nrw_pct
             ))
+def sync_expenses(system_id: int, session,
+                   cfg: dict, log: list) -> int:
+    """
+    Sync expense transactions from mWater Accounts
+    into the expenses table in Supabase.
+    Skips duplicates using mwater_id.
+    """
+    def log_msg(msg):
+        if log is not None:
+            log.append(msg)
 
+    if not cfg.get("accounts_key") or \
+       not cfg.get("accounts_base"):
+        log_msg("  Accounts API not configured — skipping")
+        return 0
+
+    CASH_ACCOUNT = "302bafeccb9d4cb0ae442cffb833a64c"
+    ACCOUNT_NAMES = {
+        "998ebd77689a4bd388af840c4ca860b4": "Office Expenses",
+        "eca51b9feeab4cb79c77c9445585044d": "Operating Expenses",
+        "11fe4eb898c749fe9e1dadae10933f30": "Salaries and Wages",
+    }
+
+    try:
+        # Fetch all transactions
+        all_txns = []
+        skip     = 0
+        while True:
+            r = requests.get(
+                f"{cfg['accounts_base']}/transactions",
+                params={
+                    "client": cfg["accounts_key"],
+                    "limit":  50,
+                    "skip":   skip
+                },
+                timeout=30
+            )
+            if r.status_code != 200 or not r.text.strip():
+                break
+            batch = r.json()
+            if not batch:
+                break
+            all_txns.extend(batch)
+            if len(batch) < 50:
+                break
+            skip += 50
+
+        # Filter expense transactions
+        expense_txns = [
+            t for t in all_txns
+            if t.get("from_account") == CASH_ACCOUNT
+            and not t.get("customer_account")
+            and not t.get("meter_volume")
+        ]
+
+        log_msg(f"  Expense transactions found: "
+                f"{len(expense_txns)}")
+
+        # Get existing mwater_ids to avoid duplicates
+        from sqlalchemy import text as sql_text
+        existing = set()
+        try:
+            result = session.execute(sql_text(
+                "SELECT mwater_id FROM expenses "
+                "WHERE system_id = :sid AND mwater_id IS NOT NULL"
+            ), {"sid": system_id})
+            existing = {row[0] for row in result}
+        except Exception:
+            pass
+
+        # Insert new expenses
+        new_expenses = 0
+        for t in expense_txns:
+            mwater_id = t.get("_id", "")
+            if mwater_id in existing:
+                continue
+
+            to_acc   = t.get("to_account", "")
+            category = ACCOUNT_NAMES.get(to_acc, "Other")
+            date_str = t.get("date", "")
+            month    = date_str[:7] if date_str else ""
+
+            try:
+                session.execute(sql_text("""
+                    INSERT INTO expenses
+                        (system_id, date, month, amount,
+                         category, notes, mwater_id)
+                    VALUES
+                        (:system_id, :date, :month, :amount,
+                         :category, :notes, :mwater_id)
+                    ON CONFLICT (mwater_id) DO NOTHING
+                """), {
+                    "system_id": system_id,
+                    "date":      date_str,
+                    "month":     month,
+                    "amount":    float(t.get("amount", 0)),
+                    "category":  category,
+                    "notes":     t.get("notes", ""),
+                    "mwater_id": mwater_id
+                })
+                new_expenses += 1
+                existing.add(mwater_id)
+            except Exception as e:
+                log_msg(f"  Expense insert error: {e}")
+
+        session.commit()
+        log_msg(f"  New expenses synced: {new_expenses}")
+        return new_expenses
+
+    except Exception as e:
+        log_msg(f"  Expense sync error: {e}")
+        return 0
     session.commit()
