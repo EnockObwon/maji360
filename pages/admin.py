@@ -17,7 +17,7 @@ def show():
         systems = session.query(WaterSystem).filter_by(is_active=True).all()
         total_customers = session.query(Customer).filter_by(is_active=True).count()
         total_billed    = session.query(func.sum(Bill.amount)).scalar() or 0
-        total_paid      = session.query(func.sum(Bill.amount)).filter(Bill.is_paid==True).scalar() or 0
+        total_paid      = session.query(func.sum(Bill.amount_paid)).scalar() or 0
         session.close()
         c1,c2,c3,c4 = st.columns(4)
         with c1: st.metric("Water systems", len(systems))
