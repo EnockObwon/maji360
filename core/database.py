@@ -79,6 +79,7 @@ class Bill(Base):
     bill_month    = Column(String, nullable=False)
     units_m3      = Column(Float)
     amount        = Column(Float)
+    amount_paid   = Column(Float, default=0.0) 
     is_paid       = Column(Boolean, default=False)
     sms_sent      = Column(Boolean, default=False)
     whatsapp_sent = Column(Boolean, default=False)
