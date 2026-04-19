@@ -46,13 +46,27 @@ def show():
           else "Never"
         session.close()
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Readings in database", reading_count)
-        with col2:
-            st.metric("Bills in database", bill_count)
-        with col3:
-            st.metric("Last sync", last_sync)
+        col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric(
+                        "New pump readings",
+                        results.get("new_pump", 0)
+                    )
+                with col2:
+                    st.metric(
+                        "New tank readings",
+                        results.get("new_tank", 0)
+                    )
+                with col3:
+                    st.metric(
+                        "New bills",
+                        results.get("new_bills", 0)
+                    )
+                with col4:
+                    st.metric(
+                        "New expenses",
+                        results.get("new_expenses", 0)
+                    )
 
     st.divider()
 
