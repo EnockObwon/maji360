@@ -38,9 +38,11 @@ class User(Base):
     name       = Column(String)
     role       = Column(String, default="viewer")
     password   = Column(String, nullable=False)
-    is_active  = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    system     = relationship("WaterSystem", back_populates="users")
+    is_active   = Column(Boolean, default=True)
+    is_approved = Column(Boolean, default=False)
+    requested_at = Column(DateTime, default=datetime.utcnow)
+    created_at  = Column(DateTime, default=datetime.utcnow)
+    system      = relationship("WaterSystem", back_populates="users")
 
 class Customer(Base):
     __tablename__ = "customers"
