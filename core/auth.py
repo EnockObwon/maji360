@@ -2,8 +2,12 @@ import bcrypt
 import streamlit as st
 from core.database import get_session, User, WaterSystem
 
+
 def hash_password(plain: str) -> str:
-    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+    return bcrypt.hashpw(
+        plain.encode(), bcrypt.gensalt()
+    ).decode()
+
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:
@@ -11,46 +15,113 @@ def verify_password(plain: str, hashed: str) -> bool:
     except Exception:
         return False
 
-def login(email: str, password: str):
+
+def login(email: str, password: str) -> dict | None:
     session = get_session()
     user    = session.query(User).filter_by(
         email=email, is_active=True
     ).first()
+
     if not user:
         session.close()
         return None
     if not verify_password(password, user.password):
         session.close()
         return None
+
+    # Check approval status
+    is_approved = getattr(user, 'is_approved', True)
+    if not is_approved:
+        session.close()
+        return "pending"
+
     result = {
         "id":          user.id,
         "name":        user.name,
         "email":       user.email,
         "role":        user.role,
         "system_id":   user.system_id,
-        "system_name": user.system.name if user.system else "All Systems"
+        "system_name": user.system.name
+                       if user.system else "All Systems"
     }
     session.close()
     return result
+
+
+def register_viewer(name: str, email: str,
+                    password: str,
+                    system_id: int = None) -> dict:
+    """
+    Register a new viewer account.
+    Account is inactive until approved by admin.
+    Returns dict with status and message.
+    """
+    session = get_session()
+
+    # Check if email already exists
+    existing = session.query(User).filter_by(
+        email=email
+    ).first()
+    if existing:
+        session.close()
+        return {
+            "success": False,
+            "message": "An account with this email already exists."
+        }
+
+    try:
+        user = User(
+            name        = name,
+            email       = email,
+            role        = "viewer",
+            password    = hash_password(password),
+            system_id   = system_id,
+            is_active   = True,
+            is_approved = False
+        )
+        session.add(user)
+        session.commit()
+        session.close()
+        return {
+            "success": True,
+            "message": "Registration successful. "
+                       "Your account is pending approval "
+                       "by the administrator."
+        }
+    except Exception as e:
+        session.close()
+        return {
+            "success": False,
+            "message": f"Registration failed: {e}"
+        }
+
 
 def require_login():
     if "user" not in st.session_state:
         st.warning("Please log in to continue.")
         st.stop()
 
+
 def is_super_admin() -> bool:
-    return st.session_state.get("user", {}).get("role") == "super_admin"
+    return st.session_state.get(
+        "user", {}
+    ).get("role") == "super_admin"
+
 
 def is_operator() -> bool:
-    return st.session_state.get("user", {}).get("role") in [
+    return st.session_state.get(
+        "user", {}
+    ).get("role") in [
         "super_admin", "system_admin", "operator"
     ]
+
 
 def get_user_system_id():
     user = st.session_state.get("user", {})
     if user.get("role") == "super_admin":
         return st.session_state.get("selected_system_id")
     return user.get("system_id")
+
 
 def get_accessible_systems() -> list:
     user    = st.session_state.get("user", {})
@@ -64,6 +135,7 @@ def get_accessible_systems() -> list:
             id=user.get("system_id"), is_active=True
         ).all()
     result = [{"id": s.id, "name": s.name,
-               "currency": s.currency} for s in systems]
+               "currency": s.currency}
+              for s in systems]
     session.close()
     return result
