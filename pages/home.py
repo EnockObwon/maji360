@@ -23,8 +23,10 @@ def show():
 
     # ── Latest NRW — most recent month with pump data ──
     latest_nrw = session.query(NRWRecord).filter(
-        NRWRecord.system_id    == system_id,
-        NRWRecord.water_produced > 0
+        NRWRecord.system_id      == system_id,
+        NRWRecord.water_produced  > 0,
+        NRWRecord.water_billed    > 0,
+        NRWRecord.nrw_percent     > 0
     ).order_by(NRWRecord.month.desc()).first()
 
     # ── Billing — use amount_paid not is_paid ──────────
