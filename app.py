@@ -89,26 +89,142 @@ def show_login():
     with col2:
         st.markdown("""
         <div style='text-align:center; padding: 3rem 0 2rem;'>
-            <div style='font-family:"Space Mono",monospace; font-size:36px; font-weight:700; color:#0ea5e9; letter-spacing:-1px;'>Maji360</div>
-            <div style='font-size:13px; color:#64748b; text-transform:uppercase; letter-spacing:0.1em; margin-top:4px;'>Rural Water Management Platform</div>
+            <div style='font-family:"Space Mono",monospace;
+                        font-size:36px; font-weight:700;
+                        color:#0ea5e9; letter-spacing:-1px;'>
+                Maji360
+            </div>
+            <div style='font-size:13px; color:#64748b;
+                        text-transform:uppercase;
+                        letter-spacing:0.1em; margin-top:4px;'>
+                Rural Water Management Platform
+            </div>
         </div>
         """, unsafe_allow_html=True)
-        with st.form("login_form"):
-            st.markdown("#### Sign in to your account")
-            email    = st.text_input("Email address")
-            password = st.text_input("Password", type="password")
-            submit   = st.form_submit_button("Sign in →", use_container_width=True)
-            if submit:
-                if not email or not password:
-                    st.error("Please enter your email and password.")
-                else:
-                    user = login(email.strip(), password)
-                    if user:
-                        st.session_state["user"] = user
-                        st.rerun()
+
+        tab_login, tab_register = st.tabs(
+            ["Sign in", "Request access"]
+        )
+
+        with tab_login:
+            with st.form("login_form"):
+                st.markdown("#### Sign in to your account")
+                email    = st.text_input("Email address")
+                password = st.text_input(
+                    "Password", type="password"
+                )
+                submit   = st.form_submit_button(
+                    "Sign in →", use_container_width=True
+                )
+
+                if submit:
+                    if not email or not password:
+                        st.error(
+                            "Please enter your email "
+                            "and password."
+                        )
                     else:
-                        st.error("Invalid email or password.")
-        st.markdown("<div style='text-align:center; margin-top:2rem; font-size:12px; color:#94a3b8;'>Maji360 v1.0 · Sub-Saharan Africa</div>", unsafe_allow_html=True)
+                        result = login(
+                            email.strip(), password
+                        )
+                        if result == "pending":
+                            st.warning(
+                                "Your account is pending "
+                                "approval by the administrator. "
+                                "You will be notified when "
+                                "access is granted."
+                            )
+                        elif result:
+                            st.session_state["user"] = result
+                            st.rerun()
+                        else:
+                            st.error(
+                                "Invalid email or password."
+                            )
+
+        with tab_register:
+            st.markdown("#### Request viewer access")
+            st.markdown(
+                "<span style='font-size:13px;color:#64748b'>"
+                "Fill in your details below. Your account "
+                "will be reviewed and activated by the "
+                "Maji360 administrator.</span>",
+                unsafe_allow_html=True
+            )
+
+            with st.form("register_form"):
+                reg_name  = st.text_input("Full name *")
+                reg_email = st.text_input("Email address *")
+                reg_pass  = st.text_input(
+                    "Password *", type="password"
+                )
+                reg_pass2 = st.text_input(
+                    "Confirm password *", type="password"
+                )
+
+                # System selection
+                session  = get_session()
+                systems  = session.query(
+                    WaterSystem
+                ).filter_by(is_active=True).all()
+                sys_opts = {
+                    "Select a water system": None
+                }
+                for s in systems:
+                    sys_opts[s.name] = s.id
+                session.close()
+
+                reg_system = st.selectbox(
+                    "Water system of interest *",
+                    options=list(sys_opts.keys())
+                )
+
+                reg_reason = st.text_area(
+                    "Why do you need access?",
+                    placeholder="e.g. Water Board member, "
+                                "donor, government monitor...",
+                    height=80
+                )
+
+                reg_submit = st.form_submit_button(
+                    "Request access →",
+                    use_container_width=True
+                )
+
+                if reg_submit:
+                    if not reg_name or not reg_email \
+                       or not reg_pass:
+                        st.error(
+                            "Please fill in all "
+                            "required fields."
+                        )
+                    elif reg_pass != reg_pass2:
+                        st.error("Passwords do not match.")
+                    elif sys_opts.get(reg_system) is None:
+                        st.error(
+                            "Please select a water system."
+                        )
+                    else:
+                        from core.auth import register_viewer
+                        result = register_viewer(
+                            name      = reg_name,
+                            email     = reg_email,
+                            password  = reg_pass,
+                            system_id = sys_opts[reg_system]
+                        )
+                        if result["success"]:
+                            st.success(result["message"])
+                        else:
+                            st.error(result["message"])
+
+        st.markdown(
+            "<div style='text-align:center; "
+            "margin-top:2rem; font-size:12px; "
+            "color:#94a3b8;'>"
+            "Maji360 v1.0 · Sub-Saharan Africa"
+            "</div>",
+            unsafe_allow_html=True
+        )
 
 def show_sidebar():
     user = st.session_state.get("user", {})
