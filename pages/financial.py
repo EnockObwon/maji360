@@ -97,7 +97,9 @@ def show():
     with c3:
         st.metric(
             "Net surplus",
-            f"{currency} {net_surplus:,.0f}"
+            f"{currency} {net_surplus/1000000:.2f}M"
+            if net_surplus >= 1000000
+            else f"{currency} {net_surplus:,.0f}"
         )
     with c4:
         expense_ratio = round(
