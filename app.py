@@ -27,12 +27,26 @@ h2 { font-weight: 500; color: #1e293b; }
 .maji-logo { font-family: 'Space Mono', monospace; font-size: 22px; font-weight: 700; color: #38bdf8 !important; letter-spacing: -0.5px; padding: 8px 0 4px; }
 .maji-tagline { font-size: 11px; color: #64748b !important; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 24px; }
 </style>
-<link rel="manifest" href="manifest.json">
+<link rel="manifest" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/manifest.json">
 <meta name="theme-color" content="#0ea5e9">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Maji360">
-<link rel="apple-touch-icon" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/static/icon-192.png">
+<link rel="apple-touch-icon" sizes="192x192" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/static/icon-192.png">
+<link rel="apple-touch-icon" sizes="512x512" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/static/icon-512.png">
+<link rel="icon" type="image/png" sizes="192x192" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/static/icon-192.png">
+<script>
+    // Force PWA manifest registration
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function() {
+            var link = document.createElement('link');
+            link.rel = 'manifest';
+            link.href = 'https://raw.githubusercontent.com/EnockObwon/maji360/main/manifest.json';
+            document.head.appendChild(link);
+        });
+    }
+</script>
 """, unsafe_allow_html=True)
 
 def seed_admin():
