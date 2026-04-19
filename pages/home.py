@@ -146,12 +146,16 @@ def show():
     with c3:
         st.metric(
             "Total billed",
-            f"{currency} {total_billed:,.0f}"
+            f"{currency} {total_billed/1000000:.2f}M"
+            if total_billed >= 1000000
+            else f"{currency} {total_billed:,.0f}"
         )
     with c4:
         st.metric(
             "Collected",
-            f"{currency} {total_paid:,.0f}"
+            f"{currency} {total_paid/1000000:.2f}M"
+            if total_paid >= 1000000
+            else f"{currency} {total_paid:,.0f}"
         )
     with c5:
         st.metric(
