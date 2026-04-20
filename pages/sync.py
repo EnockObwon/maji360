@@ -1,4 +1,3 @@
-# ── Maji360 · pages/sync.py ────────────────────────────
 import streamlit as st
 from datetime import datetime
 from core.auth import require_login, is_operator
@@ -28,14 +27,14 @@ def show():
 
     # ── Current data summary ───────────────────────────
     if system_id:
-        session = get_session()
+        session       = get_session()
         reading_count = session.query(DailyReading).filter_by(
             system_id=system_id
         ).count()
-        bill_count = session.query(Bill).filter_by(
+        bill_count    = session.query(Bill).filter_by(
             system_id=system_id
         ).count()
-        last_reading = session.query(DailyReading).filter_by(
+        last_reading  = session.query(DailyReading).filter_by(
             system_id=system_id
         ).order_by(
             DailyReading.synced_at.desc()
@@ -46,27 +45,13 @@ def show():
           else "Never"
         session.close()
 
-        col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric(
-                        "New pump readings",
-                        results.get("new_pump", 0)
-                    )
-                with col2:
-                    st.metric(
-                        "New tank readings",
-                        results.get("new_tank", 0)
-                    )
-                with col3:
-                    st.metric(
-                        "New bills",
-                        results.get("new_bills", 0)
-                    )
-                with col4:
-                    st.metric(
-                        "New expenses",
-                        results.get("new_expenses", 0)
-                    )
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Readings in database", reading_count)
+        with col2:
+            st.metric("Bills in database", bill_count)
+        with col3:
+            st.metric("Last sync", last_sync)
 
     st.divider()
 
@@ -96,10 +81,10 @@ def show():
                     st.error(f"Sync failed: {e}")
                     log.append(f"Error: {e}")
 
-            if "error" not in results:
+            if results and "error" not in results:
                 st.success("✓ Sync completed successfully.")
 
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric(
                         "New pump readings",
@@ -114,6 +99,11 @@ def show():
                     st.metric(
                         "New bills",
                         results.get("new_bills", 0)
+                    )
+                with col4:
+                    st.metric(
+                        "New expenses",
+                        results.get("new_expenses", 0)
                     )
 
             with st.expander("Sync log"):
