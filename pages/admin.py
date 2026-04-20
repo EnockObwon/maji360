@@ -149,7 +149,10 @@ def show():
                     country        = s_country,
                     currency       = s_currency,
                     tariff_per_m3  = s_tariff,
+                    tariff_psp     = s_tariff,
+                    tariff_private = s_tariff + 500,
                     mwater_form_id = s_form_id,
+                    uses_mwater    = s_uses_mwater,
                     latitude       = s_lat or None,
                     longitude      = s_lon or None
                 ))
