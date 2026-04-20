@@ -1,5 +1,4 @@
 import streamlit as st
-from datetime import datetime
 from core.auth import require_login, is_operator
 from core.sync import sync_system
 from core.database import get_session, DailyReading, Bill
@@ -28,13 +27,15 @@ def show():
     # ── Current data summary ───────────────────────────
     if system_id:
         session       = get_session()
-        reading_count = session.query(DailyReading).filter_by(
-            system_id=system_id
-        ).count()
+        reading_count = session.query(
+            DailyReading
+        ).filter_by(system_id=system_id).count()
         bill_count    = session.query(Bill).filter_by(
             system_id=system_id
         ).count()
-        last_reading  = session.query(DailyReading).filter_by(
+        last_reading  = session.query(
+            DailyReading
+        ).filter_by(
             system_id=system_id
         ).order_by(
             DailyReading.synced_at.desc()
@@ -58,8 +59,8 @@ def show():
     # ── Sync button ────────────────────────────────────
     st.markdown("### Manual sync")
     st.markdown(
-        "Pull the latest readings and billing data "
-        "from mWater into Maji360. "
+        "Pull the latest readings, customers, billing "
+        "and expense data from mWater into Maji360. "
         "This typically takes 30–60 seconds."
     )
 
@@ -84,23 +85,28 @@ def show():
             if results and "error" not in results:
                 st.success("✓ Sync completed successfully.")
 
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
+                c1, c2, c3, c4, c5 = st.columns(5)
+                with c1:
                     st.metric(
                         "New pump readings",
                         results.get("new_pump", 0)
                     )
-                with col2:
+                with c2:
                     st.metric(
                         "New tank readings",
                         results.get("new_tank", 0)
                     )
-                with col3:
+                with c3:
+                    st.metric(
+                        "New customers",
+                        results.get("new_customers", 0)
+                    )
+                with c4:
                     st.metric(
                         "New bills",
                         results.get("new_bills", 0)
                     )
-                with col4:
+                with c5:
                     st.metric(
                         "New expenses",
                         results.get("new_expenses", 0)
@@ -119,9 +125,14 @@ def show():
     every day at **06:00 Uganda time** via
     GitHub Actions.
 
+    The sync now covers:
+    - 💧 Pump and tank readings from mWater form
+    - 👥 New customers added in mWater
+    - 💰 Billing transactions from mWater Accounts
+    - 📊 Expense transactions from mWater Accounts
+
     The automatic sync runs even when no one is
-    logged into the dashboard — ensuring your data
-    is always up to date each morning.
+    logged into the dashboard.
     """)
 
     st.info(
