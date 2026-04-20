@@ -177,6 +177,13 @@ def sync_system(system_id: int, log: list = None) -> dict:
     log_msg(f"New tank readings : {new_tank}")
     log_msg(f"Duplicates skipped: {duplicates}")
 
+    # ── Sync customers from mWater ─────────────────────
+    log_msg("Syncing customers from mWater...")
+    new_customers = sync_customers(
+        system_id, system_name, form_id, session, cfg, log
+    )
+    log_msg(f"New customers synced: {new_customers}")
+    
     # ── Sync billing ───────────────────────────────────
     log_msg("Syncing billing transactions...")
     new_bills = sync_billing(system_id, session, cfg, log)
@@ -195,13 +202,14 @@ def sync_system(system_id: int, log: list = None) -> dict:
 
     log_msg("✓ Sync complete.")
     return {
-        "system":       system_name,
-        "new_pump":     new_pump,
-        "new_tank":     new_tank,
-        "new_bills":    new_bills,
-        "new_expenses": new_expenses,
-        "duplicates":   duplicates,
-        "synced_at":    datetime.now(timezone.utc).isoformat()
+        "system":         system_name,
+        "new_pump":       new_pump,
+        "new_tank":       new_tank,
+        "new_bills":      new_bills,
+        "new_expenses":   new_expenses,
+        "new_customers":  new_customers,
+        "duplicates":     duplicates,
+        "synced_at":      datetime.now(timezone.utc).isoformat()
     }
 
 def sync_billing(system_id: int, session,
