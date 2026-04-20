@@ -262,7 +262,8 @@ def show_sidebar():
             "🔄  Sync":           "Sync",
         }
         if user.get("role") == "super_admin":
-            pages["🔧  Admin"] = "Admin"
+            pages["🔧  System Setup"] = "SystemSetup"
+            pages["👑  Admin"]        = "Admin"
         for label in pages:
             if st.button(label, use_container_width=True, key=f"nav_{label}"):
                 st.session_state["page"] = pages[label]
