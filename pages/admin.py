@@ -118,16 +118,24 @@ def show():
                      "ZMW", "GHS", "NGN", "RWF", "ETB"]
                 )
             with col2:
-                s_tariff  = st.number_input(
+                s_tariff   = st.number_input(
                     "Tariff per m³",
                     min_value=0.0, value=2500.0
                 )
-                s_form_id = st.text_input("mWater form ID")
-                s_lat     = st.number_input(
-                    "Latitude", value=0.0, format="%.6f"
+                s_form_id  = st.text_input(
+                    "mWater form ID"
                 )
-                s_lon     = st.number_input(
-                    "Longitude", value=0.0, format="%.6f"
+                s_uses_mwater = st.checkbox(
+                    "This system uses mWater",
+                    value=True
+                )
+                s_lat = st.number_input(
+                    "Latitude", value=0.0,
+                    format="%.6f"
+                )
+                s_lon = st.number_input(
+                    "Longitude", value=0.0,
+                    format="%.6f"
                 )
 
             if st.form_submit_button(
