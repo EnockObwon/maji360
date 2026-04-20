@@ -250,7 +250,17 @@ def show_sidebar():
                 st.session_state["currency"]             = system.currency
         st.divider()
         st.markdown("**Navigation**")
-        pages = {"🏠  Home": "Home", "📉  NRW Report": "NRW", "💰  Billing": "Billing", "📊  Financial": "Financial", "⚙️  Operations": "Operations", "🗺️  Map": "Map", "🔄  Sync": "Sync"}
+        pages = {
+            "🏠  Home":           "Home",
+            "📉  NRW Report":     "NRW",
+            "💰  Billing":        "Billing",
+            "📊  Financial":      "Financial",
+            "⚙️  Operations":     "Operations",
+            "📋  Field Ops":      "FieldOps",
+            "💵  Customer Billing": "CustomerBilling",
+            "🗺️  Map":            "Map",
+            "🔄  Sync":           "Sync",
+        }
         if user.get("role") == "super_admin":
             pages["🔧  Admin"] = "Admin"
         for label in pages:
