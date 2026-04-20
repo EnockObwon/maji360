@@ -305,3 +305,12 @@ else:
     elif page == "Financial":
         from pages.financial import show
         show()
+    elif page == "FieldOps":
+        from pages.field_ops import show
+        show()
+    elif page == "CustomerBilling":
+        from pages.customer_billing import show
+        show()
+    elif page == "SystemSetup":
+        from pages.system_setup import show
+        show()
