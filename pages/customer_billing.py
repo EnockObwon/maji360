@@ -7,7 +7,6 @@ from core.database import (
 )
 from core.auth import require_login, is_operator
 
-
 def get_tariff(system: WaterSystem,
                connection_type: str) -> float:
     """Get tariff based on connection type."""
