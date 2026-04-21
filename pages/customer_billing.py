@@ -5,14 +5,7 @@ from core.database import (
     get_session, WaterSystem, Customer,
     Bill, MeterReading, Payment
 )
-from core.auth import require_login, is_operator
-
-def get_tariff(system: WaterSystem,
-               connection_type: str) -> float:
-    """Get tariff based on connection type."""
-    if connection_type == "Private":
-        return getattr(system, 'tariff_private', 3000.0)
-    return getattr(system, 'tariff_psp', 2500.0)
+from core.auth import require_login
 
 
 def show():
@@ -22,6 +15,7 @@ def show():
     system_name = st.session_state.get(
         "selected_system_name", ""
     )
+    currency    = st.session_state.get("currency", "UGX")
 
     if not system_id:
         st.warning("Please select a water system.")
@@ -31,9 +25,10 @@ def show():
     system      = session.query(WaterSystem).filter_by(
         id=system_id
     ).first()
-    uses_mwater = getattr(system, 'uses_mwater', True)
-    currency    = system.currency or "UGX"
-    customers   = session.query(Customer).filter_by(
+    uses_mwater    = getattr(system, 'uses_mwater', True)
+    tariff_psp     = getattr(system, 'tariff_psp', 2500.0) or 2500.0
+    tariff_private = getattr(system, 'tariff_private', 3000.0) or 3000.0
+    customers      = session.query(Customer).filter_by(
         system_id=system_id, is_active=True
     ).order_by(Customer.name).all()
     session.close()
@@ -69,38 +64,32 @@ def show():
             f"{c.account_no} — {c.name}": c
             for c in customers
         }
-
         selected_name = st.selectbox(
             "Select customer *",
-            options=list(cust_options.keys())
+            options=list(cust_options.keys()),
+            key="bill_customer"
         )
         customer = cust_options[selected_name]
 
-        # Show customer details
         conn_type = getattr(
             customer, 'connection_type', 'PSP'
         ) or 'PSP'
-        session   = get_session()
-        system    = session.query(WaterSystem).filter_by(
-            id=system_id
-        ).first()
-        tariff    = get_tariff(system, conn_type)
-        session.close()
+        tariff    = tariff_private \
+                    if conn_type == "Private" \
+                    else tariff_psp
+        last_rdg  = getattr(
+            customer, 'last_reading', 0
+        ) or 0
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.markdown(
-                f"**Connection:** {conn_type}"
-            )
+            st.markdown(f"**Connection:** {conn_type}")
         with col2:
             st.markdown(
                 f"**Tariff:** {currency} "
                 f"{tariff:,.0f}/m³"
             )
         with col3:
-            last_rdg = getattr(
-                customer, 'last_reading', 0
-            ) or 0
             st.markdown(
                 f"**Last reading:** {last_rdg:.1f} m³"
             )
@@ -131,7 +120,6 @@ def show():
                 value=datetime.now().date()
             )
 
-            # Preview calculation
             if curr_reading > prev_reading:
                 consumption = round(
                     curr_reading - prev_reading, 2
@@ -140,15 +128,13 @@ def show():
                     consumption * tariff, 0
                 )
                 st.markdown(
-                    f"""
-                    <div style='background:#f0fdf4;
-                    border-radius:8px;padding:12px 16px;
-                    margin:8px 0'>
-                    <b>Bill preview</b><br>
-                    Consumption: {consumption:.1f} m³<br>
-                    Amount: {currency} {bill_amount:,.0f}
-                    </div>
-                    """,
+                    f"<div style='background:#f0fdf4;"
+                    f"border-radius:8px;"
+                    f"padding:12px 16px;margin:8px 0'>"
+                    f"<b>Bill preview</b><br>"
+                    f"Consumption: {consumption:.1f} m³"
+                    f"<br>Amount: {currency} "
+                    f"{bill_amount:,.0f}</div>",
                     unsafe_allow_html=True
                 )
             else:
@@ -164,15 +150,13 @@ def show():
             if submitted:
                 if curr_reading <= prev_reading:
                     st.error(
-                        "Current reading must be greater "
-                        "than previous reading."
+                        "Current reading must be "
+                        "greater than previous reading."
                     )
                 else:
                     bill_month = bill_date.strftime(
                         "%Y-%m"
                     )
-
-                    # Check if bill already exists
                     session  = get_session()
                     existing = session.query(Bill).filter_by(
                         system_id   = system_id,
@@ -182,15 +166,13 @@ def show():
 
                     if existing:
                         st.warning(
-                            f"A bill already exists for "
+                            f"Bill already exists for "
                             f"{customer.name} in "
-                            f"{bill_month}. "
-                            f"Delete it first to regenerate."
+                            f"{bill_month}."
                         )
                         session.close()
                     else:
-                        # Save bill
-                        bill = Bill(
+                        session.add(Bill(
                             system_id   = system_id,
                             customer_id = customer.id,
                             bill_month  = bill_month,
@@ -198,10 +180,7 @@ def show():
                             amount      = bill_amount,
                             amount_paid = 0.0,
                             is_paid     = False
-                        )
-                        session.add(bill)
-
-                        # Save meter reading
+                        ))
                         session.add(MeterReading(
                             system_id     = system_id,
                             customer_id   = customer.id,
@@ -214,32 +193,28 @@ def show():
                             end_reading   = curr_reading,
                             volume        = consumption
                         ))
-
-                        # Update customer last reading
                         cust_obj = session.query(
                             Customer
                         ).filter_by(id=customer.id).first()
                         if cust_obj:
-                            cust_obj.last_reading      = \
+                            cust_obj.last_reading = \
                                 curr_reading
                             cust_obj.last_reading_date = \
                                 datetime.now(timezone.utc)
-
                         session.commit()
                         session.close()
 
-                        # Send SMS if phone exists
+                        # Send SMS
                         if customer.phone:
                             try:
                                 import africastalking
-                                import streamlit as st
                                 at_user = st.secrets.get(
                                     "AT_USERNAME", ""
                                 )
-                                at_key  = st.secrets.get(
+                                at_key = st.secrets.get(
                                     "AT_API_KEY", ""
                                 )
-                                sender  = st.secrets.get(
+                                sender = st.secrets.get(
                                     "AT_SENDER_ID",
                                     "Maji360"
                                 )
@@ -253,43 +228,29 @@ def show():
                                         f"{system_name}\n"
                                         f"Dear Caretaker,\n"
                                         f"Acc: "
-                                        f"{customer.account_no}\n"
-                                        f"Bill: {bill_month}\n"
-                                        f"Units: "
-                                        f"{consumption:.1f} m³\n"
-                                        f"Amount: {currency} "
-                                        f"{bill_amount:,.0f}\n"
-                                        f"Pay promptly. "
-                                        f"Thank you."
+                                        f"{customer.account_no}"
+                                        f"\nBill: {bill_month}"
+                                        f"\nUnits: "
+                                        f"{consumption:.1f} m³"
+                                        f"\nAmount: {currency}"
+                                        f" {bill_amount:,.0f}"
+                                        f"\nPay promptly."
+                                        f" Thank you."
                                     )
                                     sms.send(
                                         msg,
                                         [customer.phone],
                                         sender_id=sender
                                     )
-                                    st.success(
-                                        f"✓ Bill generated and "
-                                        f"SMS sent to "
-                                        f"{customer.phone}"
-                                    )
-                                else:
-                                    st.success(
-                                        "✓ Bill generated. "
-                                        "SMS not configured."
-                                    )
-                            except Exception as e:
-                                st.success(
-                                    f"✓ Bill generated. "
-                                    f"SMS error: {e}"
-                                )
-                        else:
-                            st.success(
-                                f"✓ Bill generated for "
-                                f"{customer.name} — "
-                                f"{currency} "
-                                f"{bill_amount:,.0f}. "
-                                f"No phone on file."
-                            )
+                            except Exception:
+                                pass
+
+                        st.success(
+                            f"✓ Bill generated — "
+                            f"{customer.name} "
+                            f"{currency} "
+                            f"{bill_amount:,.0f}"
+                        )
                         st.rerun()
 
     # ── Tab 2: Record payment ──────────────────────────
@@ -300,7 +261,6 @@ def show():
             f"{c.account_no} — {c.name}": c
             for c in customers
         }
-
         selected_name2 = st.selectbox(
             "Select customer *",
             options=list(cust_options2.keys()),
@@ -308,7 +268,6 @@ def show():
         )
         customer2 = cust_options2[selected_name2]
 
-        # Show outstanding balance
         session   = get_session()
         all_bills = session.query(Bill).filter_by(
             customer_id=customer2.id
@@ -342,7 +301,7 @@ def show():
 
         if outstanding <= 0:
             st.success(
-                "✓ This customer has no outstanding balance."
+                "✓ No outstanding balance."
             )
         else:
             with st.form("payment_form"):
@@ -360,14 +319,12 @@ def show():
                     pay_method = st.selectbox(
                         "Payment method *",
                         ["Cash", "MTN Mobile Money",
-                         "Airtel Money", "Bank transfer",
-                         "Other"]
+                         "Airtel Money",
+                         "Bank transfer", "Other"]
                     )
 
                 pay_ref   = st.text_input(
-                    "Reference / receipt number",
-                    placeholder="e.g. cash receipt no, "
-                                "transaction ID"
+                    "Reference / receipt number"
                 )
                 pay_notes = st.text_input(
                     "Notes (optional)"
@@ -384,10 +341,8 @@ def show():
                 )
 
                 if pay_submit and pay_amount > 0:
-                    session  = get_session()
-
-                    # Get unpaid bills oldest first
-                    unpaid = session.query(Bill).filter(
+                    session = get_session()
+                    unpaid  = session.query(Bill).filter(
                         Bill.customer_id == customer2.id,
                         Bill.is_paid     == False
                     ).order_by(Bill.bill_month).all()
@@ -410,7 +365,6 @@ def show():
                                 remaining
                             remaining = 0
 
-                    # Record payment
                     current_user = st.session_state.get(
                         "user", {}
                     )
@@ -419,8 +373,8 @@ def show():
                         customer_id    = customer2.id,
                         amount         = pay_amount,
                         payment_method = pay_method,
-                        reference      = pay_ref,
-                        notes          = pay_notes,
+                        reference      = pay_ref or None,
+                        notes          = pay_notes or None,
                         recorded_by    = current_user.get(
                             "id"
                         ),
@@ -432,17 +386,17 @@ def show():
                     session.commit()
                     session.close()
 
-                    # Send SMS confirmation
+                    # SMS confirmation
                     if customer2.phone:
                         try:
                             import africastalking
                             at_user = st.secrets.get(
                                 "AT_USERNAME", ""
                             )
-                            at_key  = st.secrets.get(
+                            at_key = st.secrets.get(
                                 "AT_API_KEY", ""
                             )
-                            sender  = st.secrets.get(
+                            sender = st.secrets.get(
                                 "AT_SENDER_ID", "Maji360"
                             )
                             if at_user and at_key:
@@ -450,8 +404,10 @@ def show():
                                     at_user, at_key
                                 )
                                 sms = africastalking.SMS
-                                new_balance = \
+                                new_bal = max(
+                                    0,
                                     outstanding - pay_amount
+                                )
                                 msg = (
                                     f"Maji360 | "
                                     f"{system_name}\n"
@@ -459,9 +415,9 @@ def show():
                                     f"{currency} "
                                     f"{pay_amount:,.0f}\n"
                                     f"Acc: "
-                                    f"{customer2.account_no}\n"
-                                    f"Balance: {currency} "
-                                    f"{max(0,new_balance):,.0f}"
+                                    f"{customer2.account_no}"
+                                    f"\nBalance: {currency}"
+                                    f" {new_bal:,.0f}"
                                     f"\nThank you."
                                 )
                                 sms.send(
@@ -474,8 +430,7 @@ def show():
 
                     st.success(
                         f"✓ Payment of {currency} "
-                        f"{pay_amount:,.0f} recorded "
-                        f"for {customer2.name}"
+                        f"{pay_amount:,.0f} recorded."
                     )
                     st.rerun()
 
@@ -501,14 +456,14 @@ def show():
                 c, 'connection_type', 'PSP'
             ) or 'PSP'
             rows.append({
-                "Account":    c.account_no,
-                "Customer":   c.name,
-                "Type":       conn,
-                "Billed":     f"{currency} {billed:,.0f}",
-                "Paid":       f"{currency} {paid:,.0f}",
-                "Outstanding":f"{currency} {owed:,.0f}",
-                "Rate":       f"{rate:.0f}%",
-                "Phone":      c.phone or "—"
+                "Account":     c.account_no,
+                "Customer":    c.name,
+                "Type":        conn,
+                "Billed":      f"{currency} {billed:,.0f}",
+                "Paid":        f"{currency} {paid:,.0f}",
+                "Outstanding": f"{currency} {owed:,.0f}",
+                "Rate":        f"{rate:.0f}%",
+                "Phone":       c.phone or "—"
             })
         session.close()
 
@@ -519,4 +474,4 @@ def show():
                 hide_index=True
             )
         else:
-            st.info("No customer billing data yet.")
+            st.info("No billing data yet.")
