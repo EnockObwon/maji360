@@ -78,7 +78,8 @@ KR_TO_METER = {
 }
 
 
-def sync_system(system_id: int, log: list = None) -> dict:
+def sync_system(system_id: int,
+                log: list = None) -> dict:
     def log_msg(msg: str):
         if log is not None:
             log.append(msg)
@@ -168,24 +169,36 @@ def sync_system(system_id: int, log: list = None) -> dict:
             continue
 
         data = r.get("data", {})
-        ps   = safe_float(data.get(FIELD_IDS["pump_start"]))
-        pe   = safe_float(data.get(FIELD_IDS["pump_end"]))
-        ts   = safe_float(data.get(FIELD_IDS["tank_start"]))
-        te   = safe_float(data.get(FIELD_IDS["tank_end"]))
+        ps   = safe_float(
+            data.get(FIELD_IDS["pump_start"])
+        )
+        pe   = safe_float(
+            data.get(FIELD_IDS["pump_end"])
+        )
+        ts   = safe_float(
+            data.get(FIELD_IDS["tank_start"])
+        )
+        te   = safe_float(
+            data.get(FIELD_IDS["tank_end"])
+        )
 
         submitted = r.get("submittedOn", "")
         try:
             reading_date = datetime.fromisoformat(
                 submitted.replace("Z", "+00:00")
-            ) if submitted else datetime.now(timezone.utc)
+            ) if submitted else datetime.now(
+                timezone.utc
+            )
         except Exception:
             reading_date = datetime.now(timezone.utc)
 
         pumped   = round(pe - ps, 2) \
-                   if ps is not None and pe is not None \
+                   if ps is not None \
+                   and pe is not None \
                    and pe > ps else 0.0
         consumed = round(te - ts, 2) \
-                   if ts is not None and te is not None \
+                   if ts is not None \
+                   and te is not None \
                    and te > ts else 0.0
 
         if pumped == 0 and consumed == 0:
@@ -198,7 +211,9 @@ def sync_system(system_id: int, log: list = None) -> dict:
             water_consumed_m3  = consumed,
             water_sold_m3      = 0.0,
             mwater_response_id = resp_id,
-            synced_at          = datetime.now(timezone.utc)
+            synced_at          = datetime.now(
+                timezone.utc
+            )
         )
         session.add(reading)
         existing_ids.add(resp_id)
@@ -256,21 +271,24 @@ def sync_system(system_id: int, log: list = None) -> dict:
     }
 
 
-def sync_customers(system_id: int, system_name: str,
-                   form_id: str, session,
-                   cfg: dict, log: list) -> int:
+def sync_customers(system_id: int,
+                   system_name: str,
+                   form_id: str,
+                   session,
+                   cfg: dict,
+                   log: list) -> int:
     def log_msg(msg):
         if log is not None:
             log.append(msg)
 
     if not cfg.get("client_key") or not form_id:
         log_msg(
-            "  No mWater config — skipping customer sync"
+            "  No mWater config — skipping "
+            "customer sync"
         )
         return 0
 
     try:
-        # Fetch all water points from mWater group
         all_wps = []
         skip    = 0
         while True:
@@ -279,14 +297,16 @@ def sync_customers(system_id: int, system_name: str,
                 params={
                     "client":   cfg["client_key"],
                     "selector": json.dumps({
-                        "_managed_by": f"group:{GROUP_ID}"
+                        "_managed_by":
+                            f"group:{GROUP_ID}"
                     }),
                     "limit": 50,
                     "skip":  skip
                 },
                 timeout=30
             )
-            if r.status_code != 200 or not r.text.strip():
+            if r.status_code != 200 or \
+               not r.text.strip():
                 break
             batch = r.json()
             if not batch:
@@ -297,10 +317,10 @@ def sync_customers(system_id: int, system_name: str,
             skip += 50
 
         log_msg(
-            f"  mWater water points found: {len(all_wps)}"
+            f"  mWater water points found: "
+            f"{len(all_wps)}"
         )
 
-        # Get existing meter numbers in Maji360
         existing_meters = set(
             row[0] for row in session.query(
                 Customer.meter_no
@@ -308,10 +328,10 @@ def sync_customers(system_id: int, system_name: str,
             if row[0]
         )
         log_msg(
-            f"  Existing in Maji360: {len(existing_meters)}"
+            f"  Existing in Maji360: "
+            f"{len(existing_meters)}"
         )
 
-        # Fetch account numbers from mWater Accounts
         meter_to_account = {}
         if cfg.get("accounts_key") and \
            cfg.get("accounts_base"):
@@ -340,7 +360,9 @@ def sync_customers(system_id: int, system_name: str,
                         for c in r3.json()
                     }
                     for ca in r2.json():
-                        cust_id  = ca.get("customer", "")
+                        cust_id  = ca.get(
+                            "customer", ""
+                        )
                         kr_code  = mw_customers.get(
                             cust_id, ""
                         )
@@ -349,23 +371,27 @@ def sync_customers(system_id: int, system_name: str,
                             kr_code, ""
                         )
                         if meter_no and acc_code:
-                            meter_to_account[meter_no] = \
-                                acc_code
+                            meter_to_account[
+                                meter_no
+                            ] = acc_code
             except Exception as e:
-                log_msg(f"  Accounts lookup error: {e}")
+                log_msg(
+                    f"  Accounts lookup error: {e}"
+                )
 
-        # Add new water points to Maji360
         new_count = 0
         for wp in all_wps:
             code = str(wp.get("code", ""))
             if not code or code in existing_meters:
                 continue
 
-            # Only add water points for this system
-            if wp.get("water_system") != WATER_SYSTEM_ID:
+            if wp.get("water_system") != \
+               WATER_SYSTEM_ID:
                 continue
 
-            name = wp.get("name", f"Customer {code}")
+            name = wp.get(
+                "name", f"Customer {code}"
+            )
             if isinstance(name, dict):
                 name = name.get("en", str(name))
 
@@ -394,8 +420,10 @@ def sync_customers(system_id: int, system_name: str,
             ))
             existing_meters.add(code)
             new_count += 1
-            log_msg(f"  ✓ New customer: {name} "
-                    f"(meter={code} acc={account_no})")
+            log_msg(
+                f"  ✓ New customer: {name} "
+                f"(meter={code} acc={account_no})"
+            )
 
         session.commit()
         return new_count
@@ -405,8 +433,10 @@ def sync_customers(system_id: int, system_name: str,
         return 0
 
 
-def sync_billing(system_id: int, session,
-                  cfg: dict, log: list) -> int:
+def sync_billing(system_id: int,
+                  session,
+                  cfg: dict,
+                  log: list) -> int:
     def log_msg(msg):
         if log is not None:
             log.append(msg)
@@ -419,6 +449,7 @@ def sync_billing(system_id: int, session,
         return 0
 
     try:
+        # ── Fetch all transactions ─────────────────────
         all_txns = []
         skip     = 0
         while True:
@@ -431,7 +462,8 @@ def sync_billing(system_id: int, session,
                 },
                 timeout=30
             )
-            if r.status_code != 200 or not r.text.strip():
+            if r.status_code != 200 or \
+               not r.text.strip():
                 break
             batch = r.json()
             if not batch:
@@ -441,6 +473,7 @@ def sync_billing(system_id: int, session,
                 break
             skip += 50
 
+        # ── Fetch customer mapping ─────────────────────
         r2 = requests.get(
             f"{cfg['accounts_base']}/customer_accounts",
             params={
@@ -460,7 +493,8 @@ def sync_billing(system_id: int, session,
         mw_customers = {
             c["_id"]: c.get("code")
             for c in (
-                r3.json() if r3.status_code == 200 else []
+                r3.json()
+                if r3.status_code == 200 else []
             )
         }
         acc_to_kr = {
@@ -468,34 +502,48 @@ def sync_billing(system_id: int, session,
                 ca.get("customer", ""), ""
             )
             for ca in (
-                r2.json() if r2.status_code == 200 else []
+                r2.json()
+                if r2.status_code == 200 else []
             )
         }
 
-        payment_txns  = [
-            t for t in all_txns
-            if t.get("meter_volume") is None
-            and t.get("customer_account_bill")
-        ]
-        paid_bill_ids = {
-            t.get("customer_account_bill")
-            for t in payment_txns
-        }
-        billing_txns  = [
+        # ── Separate billing and payment txns ──────────
+        billing_txns = [
             t for t in all_txns
             if t.get("meter_volume") is not None
         ]
+        payment_txns = [
+            t for t in all_txns
+            if t.get("meter_volume") is None
+            and t.get("customer_account")
+        ]
 
+        # ── Total paid per customer ────────────────────
+        cust_paid = defaultdict(float)
+        for t in payment_txns:
+            acc     = t.get("customer_account", "")
+            kr_code = acc_to_kr.get(acc, "")
+            meter   = KR_TO_METER.get(kr_code, "")
+            if meter:
+                cust_paid[meter] += t.get("amount", 0)
+
+        # ── Step 1: Add any new bills ──────────────────
         new_bills = 0
         for t in billing_txns:
-            cust_acc_id = t.get("customer_account", "")
-            kr_code     = acc_to_kr.get(cust_acc_id, "")
-            meter_no    = KR_TO_METER.get(kr_code)
+            cust_acc_id = t.get(
+                "customer_account", ""
+            )
+            kr_code  = acc_to_kr.get(
+                cust_acc_id, ""
+            )
+            meter_no = KR_TO_METER.get(kr_code)
 
             if not meter_no:
                 continue
 
-            customer = session.query(Customer).filter_by(
+            customer = session.query(
+                Customer
+            ).filter_by(
                 system_id=system_id,
                 meter_no=meter_no
             ).first()
@@ -504,13 +552,12 @@ def sync_billing(system_id: int, session,
                 continue
 
             date_str   = t.get("date", "")
-            bill_month = date_str[:7] if date_str else ""
-            units_m3   = float(t.get("meter_volume", 0))
-            amount     = float(t.get("amount", 0))
-            bill_id    = t.get(
-                "customer_account_bill", ""
+            bill_month = date_str[:7] \
+                         if date_str else ""
+            units_m3   = float(
+                t.get("meter_volume", 0)
             )
-            is_paid    = bill_id in paid_bill_ids
+            amount     = float(t.get("amount", 0))
 
             existing = session.query(Bill).filter_by(
                 system_id   = system_id,
@@ -518,23 +565,78 @@ def sync_billing(system_id: int, session,
                 bill_month  = bill_month
             ).first()
 
-            if existing:
-                if existing.is_paid != is_paid:
-                    existing.is_paid = is_paid
-                continue
-
-            session.add(Bill(
-                system_id   = system_id,
-                customer_id = customer.id,
-                bill_month  = bill_month,
-                units_m3    = units_m3,
-                amount      = amount,
-                is_paid     = is_paid,
-                sms_sent    = False
-            ))
-            new_bills += 1
+            if not existing:
+                session.add(Bill(
+                    system_id   = system_id,
+                    customer_id = customer.id,
+                    bill_month  = bill_month,
+                    units_m3    = units_m3,
+                    amount      = amount,
+                    amount_paid = 0.0,
+                    is_paid     = False,
+                    sms_sent    = False
+                ))
+                new_bills += 1
 
         session.commit()
+        log_msg(f"  New bills added: {new_bills}")
+
+        # ── Step 2: Recalculate amount_paid ───────────
+        # for ALL customers on every sync
+        # This catches partial payments recorded
+        # in mWater since last sync
+        log_msg(
+            "  Recalculating payments for "
+            "all customers..."
+        )
+
+        updated_payments = 0
+        for meter_no, total_paid in cust_paid.items():
+            customer = session.query(
+                Customer
+            ).filter_by(
+                system_id=system_id,
+                meter_no=meter_no
+            ).first()
+
+            if not customer:
+                continue
+
+            cust_bills = session.query(Bill).filter_by(
+                system_id   = system_id,
+                customer_id = customer.id
+            ).order_by(Bill.bill_month).all()
+
+            if not cust_bills:
+                continue
+
+            remaining = total_paid
+            for bill in cust_bills:
+                bill_amount = bill.amount or 0
+                if remaining >= bill_amount:
+                    new_paid    = bill_amount
+                    new_is_paid = True
+                    remaining  -= bill_amount
+                elif remaining > 0:
+                    new_paid    = remaining
+                    new_is_paid = False
+                    remaining   = 0
+                else:
+                    new_paid    = 0
+                    new_is_paid = False
+
+                if bill.amount_paid != new_paid or \
+                   bill.is_paid != new_is_paid:
+                    bill.amount_paid = new_paid
+                    bill.is_paid     = new_is_paid
+                    updated_payments += 1
+
+        session.commit()
+        log_msg(
+            f"  Payment records updated: "
+            f"{updated_payments}"
+        )
+
         return new_bills
 
     except Exception as e:
@@ -542,8 +644,10 @@ def sync_billing(system_id: int, session,
         return 0
 
 
-def sync_expenses(system_id: int, session,
-                   cfg: dict, log: list) -> int:
+def sync_expenses(system_id: int,
+                   session,
+                   cfg: dict,
+                   log: list) -> int:
     def log_msg(msg):
         if log is not None:
             log.append(msg)
@@ -578,7 +682,8 @@ def sync_expenses(system_id: int, session,
                 },
                 timeout=30
             )
-            if r.status_code != 200 or not r.text.strip():
+            if r.status_code != 200 or \
+               not r.text.strip():
                 break
             batch = r.json()
             if not batch:
@@ -623,7 +728,8 @@ def sync_expenses(system_id: int, session,
                 to_acc, "Other"
             )
             date_str = t.get("date", "")
-            month    = date_str[:7] if date_str else ""
+            month    = date_str[:7] \
+                       if date_str else ""
 
             try:
                 session.execute(sql_text("""
@@ -650,10 +756,14 @@ def sync_expenses(system_id: int, session,
                 new_expenses += 1
                 existing.add(mwater_id)
             except Exception as e:
-                log_msg(f"  Expense insert error: {e}")
+                log_msg(
+                    f"  Expense insert error: {e}"
+                )
 
         session.commit()
-        log_msg(f"  New expenses synced: {new_expenses}")
+        log_msg(
+            f"  New expenses synced: {new_expenses}"
+        )
         return new_expenses
 
     except Exception as e:
@@ -661,7 +771,8 @@ def sync_expenses(system_id: int, session,
         return 0
 
 
-def recalculate_nrw(system_id: int, session) -> None:
+def recalculate_nrw(system_id: int,
+                     session) -> None:
     readings = session.query(DailyReading).filter_by(
         system_id=system_id
     ).all()
