@@ -243,6 +243,13 @@ def sync_system(system_id: int,
     )
     log_msg(f"New bills synced  : {new_bills}")
 
+    # ── Sync payments ──────────────────────────────────
+    log_msg("Syncing payment transactions...")
+    new_payments = sync_payments(
+        system_id, session, cfg, log
+    )
+    log_msg(f"New payments synced: {new_payments}")
+
     # ── Sync expenses ──────────────────────────────────
     log_msg("Syncing expenses...")
     new_expenses = sync_expenses(
@@ -263,6 +270,7 @@ def sync_system(system_id: int,
         "new_tank":      new_tank,
         "new_customers": new_customers,
         "new_bills":     new_bills,
+        "new_payments":  new_payments,
         "new_expenses":  new_expenses,
         "duplicates":    duplicates,
         "synced_at":     datetime.now(
@@ -395,7 +403,6 @@ def sync_customers(system_id: int,
             if isinstance(name, dict):
                 name = name.get("en", str(name))
 
-            conn_raw  = wp.get("type")
             coords    = wp.get(
                 "location", {}
             ).get("coordinates", [])
@@ -582,9 +589,6 @@ def sync_billing(system_id: int,
         log_msg(f"  New bills added: {new_bills}")
 
         # ── Step 2: Recalculate amount_paid ───────────
-        # for ALL customers on every sync
-        # This catches partial payments recorded
-        # in mWater since last sync
         log_msg(
             "  Recalculating payments for "
             "all customers..."
@@ -641,6 +645,175 @@ def sync_billing(system_id: int,
 
     except Exception as e:
         log_msg(f"  Billing sync error: {e}")
+        return 0
+
+
+def sync_payments(system_id: int,
+                   session,
+                   cfg: dict,
+                   log: list) -> int:
+    """
+    Sync individual payment transactions into
+    the payments table for accurate cash flow
+    reporting by payment month.
+    """
+    def log_msg(msg):
+        if log is not None:
+            log.append(msg)
+
+    if not cfg.get("accounts_key") or \
+       not cfg.get("accounts_base"):
+        return 0
+
+    try:
+        # Fetch all transactions
+        all_txns = []
+        skip     = 0
+        while True:
+            r = requests.get(
+                f"{cfg['accounts_base']}/transactions",
+                params={
+                    "client": cfg["accounts_key"],
+                    "limit":  50,
+                    "skip":   skip
+                },
+                timeout=30
+            )
+            if r.status_code != 200 or \
+               not r.text.strip():
+                break
+            batch = r.json()
+            if not batch:
+                break
+            all_txns.extend(batch)
+            if len(batch) < 50:
+                break
+            skip += 50
+
+        # Fetch customer mapping
+        r2 = requests.get(
+            f"{cfg['accounts_base']}/customer_accounts",
+            params={
+                "client": cfg["accounts_key"],
+                "limit":  50
+            },
+            timeout=15
+        )
+        r3 = requests.get(
+            f"{cfg['accounts_base']}/customers",
+            params={
+                "client": cfg["accounts_key"],
+                "limit":  50
+            },
+            timeout=15
+        )
+        mw_customers = {
+            c["_id"]: c.get("code")
+            for c in (
+                r3.json()
+                if r3.status_code == 200 else []
+            )
+        }
+        acc_to_kr = {
+            ca["_id"]: mw_customers.get(
+                ca.get("customer", ""), ""
+            )
+            for ca in (
+                r2.json()
+                if r2.status_code == 200 else []
+            )
+        }
+
+        # Filter payment transactions
+        payment_txns = [
+            t for t in all_txns
+            if t.get("meter_volume") is None
+            and t.get("customer_account")
+        ]
+
+        # Get existing payments to avoid duplicates
+        from sqlalchemy import text as sql_text
+        existing_payments = set()
+        try:
+            result = session.execute(sql_text(
+                "SELECT customer_id, amount, "
+                "DATE(paid_at) FROM payments "
+                "WHERE system_id = :sid"
+            ), {"sid": system_id})
+            existing_payments = {
+                (row[0], float(row[1]),
+                 str(row[2])[:10])
+                for row in result
+            }
+        except Exception:
+            pass
+
+        new_payments = 0
+        for t in payment_txns:
+            acc     = t.get("customer_account", "")
+            kr_code = acc_to_kr.get(acc, "")
+            meter   = KR_TO_METER.get(kr_code, "")
+            if not meter:
+                continue
+
+            customer = session.query(
+                Customer
+            ).filter_by(
+                system_id=system_id,
+                meter_no=meter
+            ).first()
+            if not customer:
+                continue
+
+            date_str = t.get("date", "")
+            amount   = float(t.get("amount", 0))
+            notes    = t.get("notes", "") or ""
+
+            if not date_str or amount <= 0:
+                continue
+
+            date_only   = date_str[:10]
+            paid_at_str = f"{date_only}T00:00:00"
+
+            # Skip if already exists
+            key = (customer.id, amount, date_only)
+            if key in existing_payments:
+                continue
+
+            try:
+                session.execute(sql_text("""
+                    INSERT INTO payments
+                        (system_id, customer_id,
+                         amount, payment_method,
+                         notes, paid_at, status)
+                    VALUES
+                        (:system_id, :customer_id,
+                         :amount, :method,
+                         :notes, :paid_at,
+                         'completed')
+                """), {
+                    "system_id":   system_id,
+                    "customer_id": customer.id,
+                    "amount":      amount,
+                    "method":      "Cash",
+                    "notes":       notes,
+                    "paid_at":     paid_at_str
+                })
+                existing_payments.add(key)
+                new_payments += 1
+            except Exception as e:
+                log_msg(
+                    f"  Payment insert error: {e}"
+                )
+
+        session.commit()
+        log_msg(
+            f"  New payments synced: {new_payments}"
+        )
+        return new_payments
+
+    except Exception as e:
+        log_msg(f"  Payment sync error: {e}")
         return 0
 
 
