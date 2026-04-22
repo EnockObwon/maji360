@@ -587,7 +587,10 @@ def _show_tank_level_section(system_id: int,
     session.close()
 
     if levels:
-        dates    = [str(l[0])[:10] for l in levels]
+        dates = [
+    str(l[0])[:10] if l[0] else "—"
+    for l in levels
+]
         volumes  = [l[2] for l in levels]
         pcts     = [l[3] for l in levels]
         capacity = cap or 48
@@ -629,7 +632,9 @@ def _show_tank_level_section(system_id: int,
                 range     = [0, capacity * 1.1],
                 gridcolor = "#f1f5f9"
             ),
-            xaxis = dict(gridcolor="#f1f5f9")
+            xaxis = dict(
+            gridcolor = "#f1f5f9",
+            type      = "category"
         )
         st.plotly_chart(fig, use_container_width=True)
 
