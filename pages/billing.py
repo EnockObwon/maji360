@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from core.database import get_session, Bill, Customer, Payment
+from core.database import get_session, Bill, Customer
 from core.auth import require_login
 from collections import defaultdict
+from sqlalchemy import text as sql_text
 
 
 def show():
@@ -36,10 +37,18 @@ def show():
         system_id=system_id
     ).all()
 
-    # Fetch all payments for cash flow view
-    all_payments = session.query(Payment).filter_by(
-        system_id=system_id
-    ).all()
+    # Fetch payments using raw SQL to avoid ORM issues
+    try:
+        payment_rows = session.execute(sql_text(
+            "SELECT amount, paid_at FROM payments "
+            "WHERE system_id = :sid"
+        ), {"sid": system_id}).fetchall()
+        all_payments = [
+            {"amount": row[0], "paid_at": row[1]}
+            for row in payment_rows
+        ]
+    except Exception:
+        all_payments = []
 
     # Build customer bill map while session is open
     cust_bill_map = {}
@@ -101,32 +110,31 @@ def show():
 
     st.divider()
 
-    # ── Build monthly aggregates ───────────────────────
-    # Billed: by bill_month (when bill was issued)
-    # Collected: by payment month (when cash came in)
-    # This gives true cash flow view
-
-    monthly_billed    = defaultdict(float)
-    monthly_collected = defaultdict(float)
-
-    # Bills by bill month
+    # ── Monthly billed by bill month ───────────────────
+    monthly_billed = defaultdict(float)
     for b in all_bills:
         if b.bill_month:
             monthly_billed[b.bill_month] += \
                 b.amount or 0
 
-    # Cash collected by payment month
-    # First try from payments table
-    payments_by_month = defaultdict(float)
+    # ── Monthly collected by payment month ─────────────
+    # Cash flow view — when money actually came in
+    monthly_collected = defaultdict(float)
     if all_payments:
         for p in all_payments:
-            if p.paid_at:
-                month = p.paid_at.strftime("%Y-%m")
-                payments_by_month[month] += \
-                    p.amount or 0
-        monthly_collected = payments_by_month
+            paid_at = p.get("paid_at")
+            if paid_at:
+                try:
+                    if hasattr(paid_at, 'strftime'):
+                        month = paid_at.strftime("%Y-%m")
+                    else:
+                        month = str(paid_at)[:7]
+                    monthly_collected[month] += \
+                        p.get("amount") or 0
+                except Exception:
+                    pass
     else:
-        # Fallback: use amount_paid by bill month
+        # Fallback to bill month if no payments table
         for b in all_bills:
             if b.bill_month:
                 monthly_collected[b.bill_month] += \
@@ -154,7 +162,7 @@ def show():
         for b, c in zip(billed_vals, collected_vals)
     ]
 
-    # ── Chart 1: Collection rate by month ──────────────
+    # ── Chart 1: Cash collected by month ───────────────
     st.markdown("### Cash collected by month")
     st.caption(
         "Green = cash received that month · "
@@ -168,9 +176,7 @@ def show():
         x            = all_months,
         y            = collected_vals,
         marker_color = "#22c55e",
-        text         = [
-            f"{r}%" for r in rates
-        ],
+        text         = [f"{r}%" for r in rates],
         textposition = "inside",
         textfont     = dict(color="white", size=11)
     ))
