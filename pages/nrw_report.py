@@ -7,17 +7,20 @@ from collections import defaultdict
 from sqlalchemy import text as sql_text
 
 
-def get_tank_levels(system_id: int) -> dict:
+def get_monthly_storage_changes(system_id: int) -> dict:
     """
-    Fetch tank level readings and calculate
-    storage change per month.
-    Uses consecutive readings across all months.
-    Returns dict of month -> storage_change_m3
+    Calculate storage change per month using
+    tank level readings within each month.
+    Only returns months where at least 2 readings
+    exist within the same month.
+    Storage change = last reading - first reading
+    of that month.
     """
     session = get_session()
     try:
         levels = session.execute(sql_text(
-            "SELECT reading_date, volume_m3 "
+            "SELECT DATE(reading_date) as rdate, "
+            "volume_m3 "
             "FROM tank_levels "
             "WHERE system_id = :sid "
             "ORDER BY reading_date"
@@ -26,27 +29,25 @@ def get_tank_levels(system_id: int) -> dict:
         levels = []
     session.close()
 
-    if len(levels) < 2:
+    if not levels:
         return {}
 
-    # Build list of (date, volume) pairs
-    readings = [
-        (str(l[0])[:10], float(l[1]))
-        for l in levels
-    ]
+    # Group readings by month
+    monthly_readings = defaultdict(list)
+    for l in levels:
+        date_str = str(l[0])[:10]
+        month    = date_str[:7]
+        monthly_readings[month].append(float(l[1]))
 
-    # Calculate storage change between consecutive
-    # readings and assign to the month of the
-    # later reading
-    storage_changes = defaultdict(float)
-    for i in range(1, len(readings)):
-        prev_date, prev_vol = readings[i - 1]
-        curr_date, curr_vol = readings[i]
-        change = round(curr_vol - prev_vol, 2)
-        month  = curr_date[:7]
-        storage_changes[month] += change
+    # Calculate storage change only for months
+    # with at least 2 readings
+    storage_changes = {}
+    for month, vols in monthly_readings.items():
+        if len(vols) >= 2:
+            change = round(vols[-1] - vols[0], 2)
+            storage_changes[month] = change
 
-    return dict(storage_changes)
+    return storage_changes
 
 
 def show():
@@ -116,23 +117,25 @@ def show():
         round(monthly[m]["consumed"], 1)
         for m in months
     ]
-    nrw_m3   = [
+    nrw_m3  = [
         round(p - c, 1)
         for p, c in zip(pumped, consumed)
     ]
-    nrw_pct  = [
+    nrw_pct = [
         round((n / p) * 100, 1)
         if p > 0 else 0
         for n, p in zip(nrw_m3, pumped)
     ]
 
-    # ── Get tank level storage changes ─────────────────
-    storage_changes = get_tank_levels(system_id)
-    has_adjusted    = len(storage_changes) > 0
+    # ── Get monthly storage changes ────────────────────
+    storage_changes = get_monthly_storage_changes(
+        system_id
+    )
+    has_adjusted = len(storage_changes) > 0
 
-    # ── Calculate adjusted NRW ─────────────────────────
-    adj_nrw_m3  = []
+    # ── Calculate adjusted NRW per month ───────────────
     adj_nrw_pct = []
+    adj_nrw_m3  = []
 
     for i, month in enumerate(months):
         if month in storage_changes:
@@ -146,6 +149,14 @@ def show():
         else:
             adj_nrw_m3.append(None)
             adj_nrw_pct.append(None)
+
+    adj_months = [
+        m for m, v in zip(months, adj_nrw_pct)
+        if v is not None
+    ]
+    adj_vals = [
+        v for v in adj_nrw_pct if v is not None
+    ]
 
     # ── KPI cards ──────────────────────────────────────
     total_pumped   = sum(pumped)
@@ -175,7 +186,10 @@ def show():
             f"{total_consumed:.0f} m³"
         )
     with c3:
-        st.metric("Overall NRW", f"{overall_nrw}%")
+        st.metric(
+            "Overall NRW",
+            f"{overall_nrw}%"
+        )
     with c4:
         if latest_adj is not None:
             st.metric(
@@ -185,39 +199,36 @@ def show():
             )
         else:
             st.metric(
-                "Latest NRW", f"{latest_nrw}%"
+                "Latest NRW",
+                f"{latest_nrw}%"
             )
 
+    # ── Status banner ──────────────────────────────────
     if has_adjusted:
-        st.info(
-            "ℹ️ Adjusted NRW accounts for changes "
-            "in tank storage. Orange dotted line "
-            "shows adjusted NRW where tank level "
-            "data is available."
+        st.success(
+            "✓ Adjusted NRW available for months "
+            "with daily tank level readings. "
+            "Continue recording daily dips in "
+            "Field Ops for ongoing adjusted figures."
         )
     else:
         st.info(
-            "ℹ️ Record daily tank level dips in "
-            "Field Ops to enable adjusted NRW."
+            "ℹ️ Adjusted NRW not yet available. "
+            "Record at least 2 tank level dip readings "
+            "within the same month in Field Ops to "
+            "enable adjusted NRW for that month."
         )
 
     st.divider()
 
-    # ── Chart 1: Pump vs Tank NRW gap ─────────────────
+    # ── Chart 1: Pump vs Tank grouped bar ─────────────
     st.markdown("### Pump vs tank — NRW gap")
     st.caption(
         "Blue = pumped · Green = to consumers · "
         "Red line = operational NRW % · "
-        "Orange dotted = adjusted NRW %"
+        "Orange dotted = adjusted NRW % "
+        "(months with 2+ tank level readings)"
     )
-
-    adj_months = [
-        m for m, v in zip(months, adj_nrw_pct)
-        if v is not None
-    ]
-    adj_vals = [
-        v for v in adj_nrw_pct if v is not None
-    ]
 
     fig1 = go.Figure()
     fig1.add_trace(go.Bar(
@@ -249,7 +260,7 @@ def show():
                 "#22c55e"
                 for p in nrw_pct
             ],
-            line = dict(color="white", width=1.5)
+            line  = dict(color="white", width=1.5)
         )
     ))
 
@@ -268,6 +279,7 @@ def show():
             marker = dict(size=8)
         ))
 
+    max_nrw = max(nrw_pct) if nrw_pct else 100
     fig1.add_hline(
         y                   = 20,
         line_dash           = "dash",
@@ -277,7 +289,6 @@ def show():
         annotation_position = "top right",
         yref                = "y2"
     )
-    max_nrw = max(nrw_pct) if nrw_pct else 100
     fig1.update_layout(
         barmode       = "group",
         height        = 400,
@@ -315,7 +326,8 @@ def show():
     st.markdown("### NRW trend over time")
     st.caption(
         "Red = operational NRW · "
-        "Orange dotted = adjusted NRW"
+        "Orange dotted = adjusted NRW "
+        "(months with 2+ tank level readings)"
     )
 
     fig2 = go.Figure()
@@ -415,11 +427,12 @@ def show():
     st.markdown("""
     <div style='font-size:12px;color:#94a3b8;
     margin-top:8px'>
-    ℹ️ Storage Δ = change in tank volume that month.
-    Positive = tank filled (reduces real NRW).
-    Negative = tank drained (increases real NRW).
-    Adj NRW requires daily tank level readings
-    in Field Ops.
+    ℹ️ Storage Δ = change in tank volume within
+    that month (last reading minus first reading).
+    Requires at least 2 tank level readings in
+    the same month. Positive = tank filled
+    (reduces real NRW). Negative = tank drained
+    (increases real NRW).
     </div>
     """, unsafe_allow_html=True)
 
@@ -474,5 +487,6 @@ def show():
     st.caption(
         "Annual figures are most reliable as tank "
         "storage changes cancel out over 12 months. "
-        "Adj NRW requires daily tank level readings."
+        "Adj NRW requires 2+ tank level readings "
+        "per month in Field Ops."
     )
