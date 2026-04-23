@@ -391,6 +391,24 @@ def get_maintenance_events(system_id: int) -> dict:
         annotation_text     = "20% threshold",
         annotation_position = "top right"
     )
+    # Add maintenance event markers on NRW chart
+    maintenance_events = get_maintenance_events(
+        system_id
+    )
+    for month in months:
+        if month in maintenance_events:
+            events  = maintenance_events[month]
+            label   = f"🔧 {len(events)} maintenance"
+            m_index = months.index(month)
+            fig2.add_vline(
+                x             = month,
+                line_dash     = "dot",
+                line_color    = "#8b5cf6",
+                opacity       = 0.6,
+                annotation_text = label,
+                annotation_position = "top left",
+                annotation_font_size = 10
+            )
     fig2.update_layout(
         height        = 300,
         margin        = dict(t=20, b=10, l=0, r=0),
