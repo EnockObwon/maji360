@@ -5,30 +5,14 @@ from core.database import (
     get_session, WaterSystem, Asset, Customer
 )
 from core.auth import require_login
+import math
 
 
 ASSET_TYPES = [
-    # Water source and pumping
-    "borehole",
-    "pump",
-    "pump_house",
-    "power_supply",
-    "generator",        # optional
-    # Pipelines
-    "pipeline",
-    "pipe",
-    # Storage
-    "tank",
-    # Treatment
-    "treatment",
-    # Metering
-    "meter",
-    # Control
-    "valve",
-    # Civil
-    "civil",
-    # Other
-    "other"
+    "borehole", "pump", "pump_house",
+    "power_supply", "generator", "pipeline",
+    "pipe", "tank", "treatment", "meter",
+    "valve", "civil", "other"
 ]
 
 ASSET_TYPE_LABELS = {
@@ -40,10 +24,10 @@ ASSET_TYPE_LABELS = {
     "pipeline":     "Pipeline",
     "pipe":         "Pipe (overflow/other)",
     "tank":         "Storage tank",
-    "treatment":    "Water treatment (chlorinator/house)",
+    "treatment":    "Water treatment",
     "meter":        "Bulk or customer meter",
     "valve":        "Valve (gate/air release)",
-    "civil":        "Civil structure (fence/road/building)",
+    "civil":        "Civil structure",
     "other":        "Other"
 }
 
@@ -66,7 +50,25 @@ RECOMMENDED_ASSETS = [
     ("Customer Meters",                      "meter"),
     ("Fence / Security",                     "civil"),
     ("Access Road",                          "civil"),
+    ("Generator (backup)",                   "generator"),
 ]
+
+CONNECTION_TYPES = [
+    "PSP", "Private", "School", "Institution"
+]
+
+POPULATION_HELP = {
+    "PSP":         "Total number of people "
+                   "served by this PSP",
+    "Private":     "Number of people in this "
+                   "household connection. "
+                   "Note: if switching from PSP "
+                   "reduce PSP population accordingly",
+    "School":      "Current school enrollment "
+                   "(pupils + staff)",
+    "Institution": "Total number of people "
+                   "served by this connection"
+}
 
 
 def generate_account_no(system_name: str,
@@ -140,11 +142,9 @@ def show():
             "You can still register assets here "
             "for maintenance tracking."
         )
-        # Show asset management for mWater systems
-        # so maintenance tracking works
         _show_assets_tab(
-            system_id, system_name, currency,
-            mwater_mode=True
+            system_id, system_name,
+            currency, mwater_mode=True
         )
         return
 
@@ -156,35 +156,28 @@ def show():
 
     with tab1:
         _show_assets_tab(
-            system_id, system_name, currency,
-            mwater_mode=False
+            system_id, system_name,
+            currency, mwater_mode=False
         )
-
     with tab2:
         _show_customers_tab(
             system_id, system_name, currency
         )
-
     with tab3:
-        _show_tariffs_tab(
-            system_id, currency
-        )
+        _show_tariffs_tab(system_id, currency)
 
 
 def _show_assets_tab(system_id, system_name,
                       currency, mwater_mode=False):
     st.markdown("### Register assets")
     st.caption(
-        "Register all physical assets of the water "
-        "system. This enables maintenance tracking "
-        "and field operations. Register all assets "
-        "during initial setup — operators select "
-        "from this list in the field."
+        "Register all physical assets. "
+        "This enables maintenance tracking "
+        "and field operations."
     )
 
-    # ── Quick setup from recommended list ─────────────
-    session       = get_session()
-    existing      = session.query(Asset).filter_by(
+    session        = get_session()
+    existing       = session.query(Asset).filter_by(
         system_id=system_id, is_active=True
     ).all()
     existing_names = {a.name.lower() for a in existing}
@@ -199,9 +192,9 @@ def _show_assets_tab(system_id, system_name,
     if missing and not mwater_mode:
         st.markdown("#### Quick setup")
         st.caption(
-            "These are the recommended assets for "
-            "a typical rural water system. "
-            "Add all at once or individually below."
+            "Recommended assets for a typical "
+            "rural water system. Generator is "
+            "optional — uncheck if not available."
         )
 
         with st.expander(
@@ -210,11 +203,11 @@ def _show_assets_tab(system_id, system_name,
         ):
             selected = []
             for name, atype in missing:
-                label = ASSET_TYPE_LABELS.get(
+                label      = ASSET_TYPE_LABELS.get(
                     atype, atype
                 )
                 is_optional = "optional" in label.lower()
-                checked = st.checkbox(
+                checked     = st.checkbox(
                     f"{name} ({label})",
                     value=not is_optional,
                     key=f"quick_{name}"
@@ -223,7 +216,7 @@ def _show_assets_tab(system_id, system_name,
                     selected.append((name, atype))
 
             if st.button(
-                f"✓ Add {len(selected)} selected assets",
+                f"✓ Add {len(selected)} selected",
                 type="primary",
                 disabled=len(selected) == 0
             ):
@@ -242,15 +235,13 @@ def _show_assets_tab(system_id, system_name,
                 session.commit()
                 session.close()
                 st.success(
-                    f"✓ {added} assets added "
-                    f"to {system_name}"
+                    f"✓ {added} assets added."
                 )
                 st.rerun()
 
     st.divider()
-
-    # ── Add individual asset ───────────────────────────
     st.markdown("#### Add individual asset")
+
     with st.form("asset_form"):
         col1, col2 = st.columns(2)
         with col1:
@@ -260,7 +251,7 @@ def _show_assets_tab(system_id, system_name,
             )
             a_type = st.selectbox(
                 "Asset type *",
-                options=list(ASSET_TYPE_LABELS.keys()),
+                options=ASSET_TYPES,
                 format_func=lambda x:
                     ASSET_TYPE_LABELS.get(x, x)
             )
@@ -274,20 +265,15 @@ def _show_assets_tab(system_id, system_name,
                 value=0.0, format="%.6f"
             )
 
-        # Tank dimensions if tank selected
-        a_shape    = None
-        a_length   = None
-        a_width    = None
-        a_diameter = None
-        a_height   = None
-        a_capacity = None
+        a_shape = a_length = a_width = None
+        a_diameter = a_height = a_capacity = None
 
         if a_type == "tank":
             st.markdown("**Tank dimensions**")
             col3, col4 = st.columns(2)
             with col3:
-                a_shape = st.selectbox(
-                    "Tank shape *",
+                a_shape  = st.selectbox(
+                    "Shape *",
                     ["rectangular", "cylindrical"]
                 )
                 a_height = st.number_input(
@@ -327,7 +313,6 @@ def _show_assets_tab(system_id, system_name,
                         value=2.0, step=0.1,
                         format="%.1f"
                     )
-                    import math
                     if a_diameter and a_height:
                         a_capacity = round(
                             math.pi *
@@ -339,13 +324,11 @@ def _show_assets_tab(system_id, system_name,
                             f"{a_capacity} m³"
                         )
 
-        a_submit = st.form_submit_button(
+        if st.form_submit_button(
             "✓ Add asset",
             use_container_width=True,
             type="primary"
-        )
-
-        if a_submit and a_name:
+        ) and a_name:
             session = get_session()
             session.add(Asset(
                 system_id   = system_id,
@@ -367,9 +350,8 @@ def _show_assets_tab(system_id, system_name,
             st.rerun()
 
     st.divider()
-
-    # ── Registered assets ─────────────────────────────
     st.markdown("### Registered assets")
+
     session = get_session()
     assets  = session.query(Asset).filter_by(
         system_id=system_id, is_active=True
@@ -378,17 +360,12 @@ def _show_assets_tab(system_id, system_name,
 
     if assets:
         rows = [{
-            "ID":        a.id,
             "Name":      a.name,
             "Type":      ASSET_TYPE_LABELS.get(
                 a.asset_type, a.asset_type
             ),
             "Capacity":  f"{a.capacity_m3:.0f} m³"
                          if a.capacity_m3 else "—",
-            "Latitude":  f"{a.latitude:.4f}"
-                         if a.latitude else "—",
-            "Longitude": f"{a.longitude:.4f}"
-                         if a.longitude else "—"
         } for a in assets]
         st.dataframe(
             pd.DataFrame(rows),
@@ -399,16 +376,37 @@ def _show_assets_tab(system_id, system_name,
             f"**{len(assets)} assets registered**"
         )
     else:
-        st.info(
-            "No assets registered yet. "
-            "Use Quick setup above to add all "
-            "recommended assets at once."
-        )
+        st.info("No assets registered yet.")
 
 
 def _show_customers_tab(system_id, system_name,
                           currency):
     st.markdown("### Register customers")
+    st.caption(
+        "Population served is mandatory for all "
+        "connection types — this is used for "
+        "official DHIS2 reporting. "
+        "If a household switches from PSP to "
+        "private connection, reduce the PSP "
+        "population accordingly."
+    )
+
+    # Show current total population
+    session   = get_session()
+    customers = session.query(Customer).filter_by(
+        system_id=system_id, is_active=True
+    ).all()
+    session.close()
+
+    total_pop = sum(
+        getattr(c, 'population', 0) or 0
+        for c in customers
+    )
+    if total_pop > 0:
+        st.info(
+            f"Current total population served: "
+            f"**{total_pop:,} people**"
+        )
 
     next_acc = generate_account_no(
         system_name, system_id
@@ -430,8 +428,7 @@ def _show_customers_tab(system_id, system_name,
                 placeholder="e.g. Nyakabale I PSP"
             )
             c_meter   = st.text_input(
-                "Meter number *",
-                placeholder="e.g. 659279453"
+                "Meter number *"
             )
             c_phone   = st.text_input(
                 "Phone number",
@@ -441,16 +438,23 @@ def _show_customers_tab(system_id, system_name,
                 "Address / location"
             )
         with col2:
-            c_type    = st.selectbox(
+            c_type = st.selectbox(
                 "Connection type *",
-                ["PSP", "Private",
-                 "School", "Institution"]
+                CONNECTION_TYPES
+            )
+            c_population = st.number_input(
+                "Population served *",
+                min_value=0,
+                value=0,
+                step=1,
+                help=POPULATION_HELP.get(
+                    c_type, "Number of people served"
+                )
             )
             c_opening = st.number_input(
                 "Opening meter reading (m³) *",
                 min_value=0.0,
-                value=0.0,
-                step=0.1,
+                value=0.0, step=0.1,
                 format="%.1f",
                 help="Meter reading on installation day"
             )
@@ -461,6 +465,15 @@ def _show_customers_tab(system_id, system_name,
             c_lon = st.number_input(
                 "Longitude",
                 value=0.0, format="%.6f"
+            )
+
+        # Population warning for private connections
+        if c_type == "Private" and c_population > 0:
+            st.warning(
+                f"⚠️ Remember to reduce the "
+                f"population of the PSP this "
+                f"household was previously served by "
+                f"by {c_population} people."
             )
 
         c_submit = st.form_submit_button(
@@ -474,6 +487,12 @@ def _show_customers_tab(system_id, system_name,
                 st.error(
                     "Customer name and meter "
                     "number are required."
+                )
+            elif c_population == 0:
+                st.error(
+                    "Population served is required. "
+                    "Enter the number of people "
+                    "this connection serves."
                 )
             else:
                 acc_no   = generate_account_no(
@@ -499,8 +518,10 @@ def _show_customers_tab(system_id, system_name,
                         name            = c_name,
                         account_no      = acc_no,
                         meter_no        = c_meter,
-                        phone           = c_phone or None,
+                        phone           = c_phone
+                                          or None,
                         connection_type = c_type,
+                        population      = c_population,
                         opening_reading = c_opening,
                         last_reading    = c_opening,
                         address         = c_address,
@@ -510,38 +531,97 @@ def _show_customers_tab(system_id, system_name,
                     ))
                     session.commit()
                     session.close()
+                    new_total = total_pop + c_population
                     st.success(
                         f"✓ {c_name} added — "
-                        f"account {acc_no}"
+                        f"account {acc_no} · "
+                        f"population +{c_population} "
+                        f"→ total {new_total:,}"
                     )
                     st.rerun()
 
     st.divider()
     st.markdown("### Registered customers")
-    session   = get_session()
-    customers = session.query(Customer).filter_by(
-        system_id=system_id, is_active=True
-    ).all()
-    session.close()
 
     if customers:
-        rows = [{
-            "Account": c.account_no,
-            "Name":    c.name,
-            "Type":    getattr(
-                c, 'connection_type', 'PSP'
-            ) or 'PSP',
-            "Meter":   c.meter_no,
-            "Opening": getattr(
-                c, 'opening_reading', 0
-            ) or 0,
-            "Phone":   c.phone or "—"
-        } for c in customers]
+        rows = []
+        for c in customers:
+            pop  = getattr(c, 'population', 0) or 0
+            rows.append({
+                "Account":    c.account_no,
+                "Name":       c.name,
+                "Type":       getattr(
+                    c, 'connection_type', 'PSP'
+                ) or 'PSP',
+                "Population": pop,
+                "Meter":      c.meter_no,
+                "Phone":      c.phone or "—"
+            })
+
         st.dataframe(
             pd.DataFrame(rows),
             use_container_width=True,
             hide_index=True
         )
+        st.markdown(
+            f"**Total population served: "
+            f"{total_pop:,} people**"
+        )
+
+        st.divider()
+        st.markdown("### Edit customer population")
+        st.caption(
+            "Use this to correct population figures "
+            "or adjust when a household switches "
+            "from PSP to private connection."
+        )
+
+        edit_opts = {
+            f"{c.account_no} — {c.name}": c
+            for c in customers
+        }
+        edit_sel = st.selectbox(
+            "Select customer to edit",
+            options=list(edit_opts.keys()),
+            key="edit_pop_sel"
+        )
+        edit_cust = edit_opts[edit_sel]
+        current_pop = getattr(
+            edit_cust, 'population', 0
+        ) or 0
+
+        col1, col2 = st.columns(2)
+        with col1:
+            new_pop = st.number_input(
+                f"Population served "
+                f"(current: {current_pop})",
+                min_value=0,
+                value=current_pop,
+                step=1,
+                key="edit_pop_val"
+            )
+        with col2:
+            st.markdown("")
+            st.markdown("")
+            if st.button(
+                "✓ Update population",
+                type="primary"
+            ):
+                session = get_session()
+                target  = session.query(
+                    Customer
+                ).filter_by(
+                    id=edit_cust.id
+                ).first()
+                if target:
+                    target.population = new_pop
+                    session.commit()
+                session.close()
+                st.success(
+                    f"✓ Population updated to "
+                    f"{new_pop:,}"
+                )
+                st.rerun()
 
         st.divider()
         st.markdown("### Deactivate customer")
@@ -551,7 +631,8 @@ def _show_customers_tab(system_id, system_name,
         }
         deact_sel = st.selectbox(
             "Select customer to deactivate",
-            options=list(deact_opts.keys())
+            options=list(deact_opts.keys()),
+            key="deact_sel"
         )
         if st.button(
             "Deactivate selected customer",
@@ -567,7 +648,9 @@ def _show_customers_tab(system_id, system_name,
                 target.is_active = False
                 session.commit()
             session.close()
-            st.success(f"✓ {deact_sel} deactivated.")
+            st.success(
+                f"✓ {deact_sel} deactivated."
+            )
             st.rerun()
     else:
         st.info("No customers registered yet.")
@@ -595,25 +678,21 @@ def _show_tariffs_tab(system_id, currency):
                 f"PSP tariff ({currency}/m³) *",
                 min_value=0.0,
                 value=float(current_psp),
-                step=100.0,
-                format="%.0f"
+                step=100.0, format="%.0f"
             )
         with col2:
             new_private = st.number_input(
                 f"Private tariff ({currency}/m³) *",
                 min_value=0.0,
                 value=float(current_private),
-                step=100.0,
-                format="%.0f"
+                step=100.0, format="%.0f"
             )
 
-        t_submit = st.form_submit_button(
+        if st.form_submit_button(
             "✓ Update tariffs",
             use_container_width=True,
             type="primary"
-        )
-
-        if t_submit:
+        ):
             session = get_session()
             sys_obj = session.query(
                 WaterSystem
@@ -626,8 +705,8 @@ def _show_tariffs_tab(system_id, currency):
             session.close()
             st.success(
                 f"✓ Tariffs updated — "
-                f"PSP: {currency} {new_psp:,.0f}/m³ · "
-                f"Private: {currency} "
+                f"PSP: {currency} {new_psp:,.0f}/m³ "
+                f"· Private: {currency} "
                 f"{new_private:,.0f}/m³"
             )
             st.rerun()
