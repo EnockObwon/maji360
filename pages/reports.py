@@ -4,41 +4,51 @@ import io
 from datetime import datetime
 from core.database import (
     get_session, DailyReading, Bill,
-    Customer, NRWRecord, WaterSystem
+    Customer, WaterSystem
 )
 from core.auth import require_login
 from collections import defaultdict
 from sqlalchemy import text as sql_text
 
 
+def get_total_population(system_id: int) -> int:
+    """
+    Get total population served from customer
+    population field — actual figures not estimates.
+    """
+    session = get_session()
+    customers = session.query(Customer).filter_by(
+        system_id=system_id, is_active=True
+    ).all()
+    session.close()
+    return sum(
+        getattr(c, 'population', 0) or 0
+        for c in customers
+    )
+
+
 def get_report_data(system_id: int,
                     year: int,
                     month: int = None) -> dict:
-    """
-    Compile all data needed for DHIS2 report.
-    If month is None returns annual data.
-    """
     session = get_session()
 
-    # ── System info ────────────────────────────────────
     system = session.query(WaterSystem).filter_by(
         id=system_id
     ).first()
 
-    # ── Date filter ────────────────────────────────────
     if month:
-        period     = f"{year}-{month:02d}"
-        periods    = [period]
-        period_label = datetime(year, month, 1).strftime(
-            "%B %Y"
-        )
+        period       = f"{year}-{month:02d}"
+        periods      = [period]
+        period_label = datetime(
+            year, month, 1
+        ).strftime("%B %Y")
     else:
         periods      = [
             f"{year}-{m:02d}" for m in range(1, 13)
         ]
         period_label = str(year)
 
-    # ── Production data ────────────────────────────────
+    # Production
     readings = session.query(DailyReading).filter(
         DailyReading.system_id == system_id
     ).all()
@@ -72,44 +82,48 @@ def get_report_data(system_id: int,
         (total_nrw_m3 / total_pumped) * 100, 1
     ) if total_pumped > 0 else 0
 
-    # ── Customer data ──────────────────────────────────
-    customers = session.query(Customer).filter_by(
+    # Customers and population
+    customers       = session.query(Customer).filter_by(
         system_id=system_id, is_active=True
     ).all()
     total_customers = len(customers)
     psp_count       = sum(
         1 for c in customers
-        if getattr(c, 'connection_type', 'PSP') == 'PSP'
+        if getattr(c, 'connection_type', 'PSP')
+        == 'PSP'
     )
     private_count   = sum(
         1 for c in customers
-        if getattr(
-            c, 'connection_type', 'PSP'
-        ) == 'Private'
+        if getattr(c, 'connection_type', 'PSP')
+        == 'Private'
+    )
+    school_count    = sum(
+        1 for c in customers
+        if getattr(c, 'connection_type', 'PSP')
+        == 'School'
     )
 
-    # Population estimate (avg 5 per PSP = 250,
-    # avg 6 per private connection)
-    pop_estimate = (psp_count * 250) + \
-                   (private_count * 6)
+    # Use actual population from database
+    pop_estimate = sum(
+        getattr(c, 'population', 0) or 0
+        for c in customers
+    )
 
-    # Per capita (litres per person per day)
+    # Per capita litres per person per day
     days = 30 * len(periods)
     per_capita = round(
         (total_consumed * 1000) /
         (pop_estimate * days), 1
     ) if pop_estimate > 0 and days > 0 else 0
 
-    # ── Billing data ───────────────────────────────────
-    all_bills = session.query(Bill).filter_by(
+    # Billing
+    all_bills    = session.query(Bill).filter_by(
         system_id=system_id
     ).all()
-
     period_bills = [
         b for b in all_bills
         if b.bill_month in periods
     ]
-
     total_billed    = sum(
         b.amount or 0 for b in period_bills
     )
@@ -120,29 +134,23 @@ def get_report_data(system_id: int,
         (total_collected / total_billed) * 100, 1
     ) if total_billed > 0 else 0
 
-    # ── Expenses data ──────────────────────────────────
+    # Expenses
     try:
         if month:
             exp_rows = session.execute(sql_text(
                 "SELECT SUM(amount) FROM expenses "
                 "WHERE system_id = :sid "
                 "AND month = :month"
-            ), {
-                "sid":   system_id,
-                "month": period
-            }).fetchone()
+            ), {"sid": system_id,
+                "month": period}).fetchone()
         else:
             exp_rows = session.execute(sql_text(
                 "SELECT SUM(amount) FROM expenses "
                 "WHERE system_id = :sid "
                 "AND month LIKE :year"
-            ), {
-                "sid":  system_id,
-                "year": f"{year}%"
-            }).fetchone()
-        total_expenses = float(
-            exp_rows[0] or 0
-        )
+            ), {"sid":  system_id,
+                "year": f"{year}%"}).fetchone()
+        total_expenses = float(exp_rows[0] or 0)
     except Exception:
         total_expenses = 0.0
 
@@ -150,48 +158,42 @@ def get_report_data(system_id: int,
         total_collected - total_expenses, 0
     )
 
-    # ── Maintenance data ───────────────────────────────
+    # Maintenance
     try:
         if month:
             maint_rows = session.execute(sql_text(
                 "SELECT COUNT(*), "
                 "SUM(CASE WHEN status='Resolved' "
-                "THEN 1 ELSE 0 END), "
-                "SUM(cost) "
+                "THEN 1 ELSE 0 END), SUM(cost) "
                 "FROM maintenance "
                 "WHERE system_id = :sid "
                 "AND EXTRACT(YEAR FROM "
                 "incident_date) = :year "
                 "AND EXTRACT(MONTH FROM "
                 "incident_date) = :month"
-            ), {
-                "sid":   system_id,
+            ), {"sid":   system_id,
                 "year":  year,
-                "month": month
-            }).fetchone()
+                "month": month}).fetchone()
         else:
             maint_rows = session.execute(sql_text(
                 "SELECT COUNT(*), "
                 "SUM(CASE WHEN status='Resolved' "
-                "THEN 1 ELSE 0 END), "
-                "SUM(cost) "
+                "THEN 1 ELSE 0 END), SUM(cost) "
                 "FROM maintenance "
                 "WHERE system_id = :sid "
                 "AND EXTRACT(YEAR FROM "
                 "incident_date) = :year"
-            ), {
-                "sid":  system_id,
-                "year": year
-            }).fetchone()
-        total_incidents  = int(maint_rows[0] or 0)
+            ), {"sid":  system_id,
+                "year": year}).fetchone()
+        total_incidents    = int(maint_rows[0] or 0)
         resolved_incidents = int(maint_rows[1] or 0)
-        total_maint_cost = float(maint_rows[2] or 0)
+        total_maint_cost   = float(maint_rows[2] or 0)
     except Exception:
         total_incidents    = 0
         resolved_incidents = 0
         total_maint_cost   = 0.0
 
-    # ── Tank level data ────────────────────────────────
+    # Tank level
     try:
         tank_rows = session.execute(sql_text(
             "SELECT AVG(pct_full) "
@@ -219,49 +221,42 @@ def get_report_data(system_id: int,
         "periods":           periods,
         "year":              year,
         "month":             month,
-
-        # Production
         "total_pumped":      round(total_pumped, 1),
         "total_consumed":    round(total_consumed, 1),
         "total_nrw_m3":      total_nrw_m3,
         "nrw_pct":           nrw_pct,
-
-        # Customers
         "total_customers":   total_customers,
         "psp_count":         psp_count,
         "private_count":     private_count,
+        "school_count":      school_count,
         "pop_estimate":      pop_estimate,
         "per_capita":        per_capita,
-
-        # Financial
         "total_billed":      round(total_billed, 0),
         "total_collected":   round(total_collected, 0),
         "collection_rate":   collection_rate,
         "total_expenses":    round(total_expenses, 0),
         "net_surplus":       net_surplus,
-
-        # Maintenance
         "total_incidents":   total_incidents,
         "resolved_incidents": resolved_incidents,
         "total_maint_cost":  round(total_maint_cost, 0),
-
-        # Tank
         "avg_tank_pct":      avg_tank_pct
     }
 
 
 def generate_excel(system_id: int,
                    year: int) -> bytes:
-    """
-    Generate comprehensive Excel export
-    for the full year.
-    """
-    session = get_session()
-    system  = session.query(WaterSystem).filter_by(
+    session  = get_session()
+    system   = session.query(WaterSystem).filter_by(
         id=system_id
     ).first()
     currency = system.currency if system else "UGX"
     sys_name = system.name if system else ""
+    customers = session.query(Customer).filter_by(
+        system_id=system_id, is_active=True
+    ).all()
+    all_bills = session.query(Bill).filter_by(
+        system_id=system_id
+    ).all()
     session.close()
 
     output = io.BytesIO()
@@ -270,7 +265,6 @@ def generate_excel(system_id: int,
     )
     wb = writer.book
 
-    # ── Formats ────────────────────────────────────────
     fmt_title = wb.add_format({
         "bold": True, "font_size": 14,
         "font_color": "#0ea5e9",
@@ -283,10 +277,9 @@ def generate_excel(system_id: int,
     })
     fmt_subheader = wb.add_format({
         "bold": True, "bg_color": "#e0f2fe",
-        "font_color": "#0369a1",
-        "border": 1
+        "font_color": "#0369a1", "border": 1
     })
-    fmt_number = wb.add_format({
+    fmt_number  = wb.add_format({
         "num_format": "#,##0",
         "border": 1, "align": "right"
     })
@@ -294,11 +287,7 @@ def generate_excel(system_id: int,
         "num_format": "#,##0.0",
         "border": 1, "align": "right"
     })
-    fmt_pct = wb.add_format({
-        "num_format": "0.0%",
-        "border": 1, "align": "right"
-    })
-    fmt_cell = wb.add_format({"border": 1})
+    fmt_cell  = wb.add_format({"border": 1})
     fmt_alert = wb.add_format({
         "bg_color": "#fef2f2",
         "font_color": "#991b1b",
@@ -307,6 +296,12 @@ def generate_excel(system_id: int,
         "num_format": "0.0"
     })
 
+    months_labels = [
+        "Jan", "Feb", "Mar", "Apr",
+        "May", "Jun", "Jul", "Aug",
+        "Sep", "Oct", "Nov", "Dec"
+    ]
+
     # ── Sheet 1: Monthly Summary ───────────────────────
     ws1 = wb.add_worksheet("Monthly Summary")
     ws1.set_column("A:A", 30)
@@ -314,7 +309,7 @@ def generate_excel(system_id: int,
 
     ws1.merge_range(
         "A1:M1",
-        f"Maji360 — {sys_name} — {year} Annual Report",
+        f"Maji360 — {sys_name} — {year} Report",
         fmt_title
     )
     ws1.merge_range(
@@ -327,135 +322,85 @@ def generate_excel(system_id: int,
         })
     )
 
-    months_labels = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-    ]
-
-    # Headers
     ws1.write(3, 0, "Indicator", fmt_header)
     for i, m in enumerate(months_labels):
         ws1.write(3, i + 1, m, fmt_header)
 
     row = 4
 
-    # Production section
-    ws1.write(row, 0, "WATER PRODUCTION",
-              fmt_subheader)
-    for i in range(12):
-        ws1.write(row, i + 1, "", fmt_subheader)
-    row += 1
-
-    indicators = [
-        ("Pumped (m³)", "total_pumped", fmt_decimal),
-        ("Consumed (m³)", "total_consumed",
-         fmt_decimal),
-        ("NRW (m³)", "total_nrw_m3", fmt_decimal),
-        ("NRW (%)", "nrw_pct", fmt_decimal),
+    sections = [
+        ("WATER PRODUCTION", [
+            ("Pumped (m³)", "total_pumped",
+             fmt_decimal),
+            ("Consumed (m³)", "total_consumed",
+             fmt_decimal),
+            ("NRW (m³)", "total_nrw_m3",
+             fmt_decimal),
+            ("NRW (%)", "nrw_pct", fmt_decimal),
+        ]),
+        ("SERVICE COVERAGE", [
+            ("Active connections",
+             "total_customers", fmt_number),
+            ("PSP connections",
+             "psp_count", fmt_number),
+            ("Private connections",
+             "private_count", fmt_number),
+            ("School connections",
+             "school_count", fmt_number),
+            ("Population served",
+             "pop_estimate", fmt_number),
+            ("Per capita (L/p/day)",
+             "per_capita", fmt_decimal),
+        ]),
+        ("FINANCIAL PERFORMANCE", [
+            (f"Billed ({currency})",
+             "total_billed", fmt_number),
+            (f"Collected ({currency})",
+             "total_collected", fmt_number),
+            ("Collection rate (%)",
+             "collection_rate", fmt_decimal),
+            (f"Expenses ({currency})",
+             "total_expenses", fmt_number),
+            (f"Net surplus ({currency})",
+             "net_surplus", fmt_number),
+        ]),
+        ("MAINTENANCE", [
+            ("Total incidents",
+             "total_incidents", fmt_number),
+            ("Resolved incidents",
+             "resolved_incidents", fmt_number),
+            (f"Maintenance cost ({currency})",
+             "total_maint_cost", fmt_number),
+        ]),
     ]
 
-    for label, key, fmt in indicators:
-        ws1.write(row, 0, label, fmt_cell)
-        for i in range(1, 13):
-            data = get_report_data(
-                system_id, year, i
-            )
-            val = data.get(key, 0)
-            if key == "nrw_pct" and val >= 20:
-                ws1.write(row, i, val, fmt_alert)
-            else:
-                ws1.write(row, i, val, fmt)
+    for section_name, indicators in sections:
+        ws1.write(row, 0, section_name,
+                  fmt_subheader)
+        for i in range(12):
+            ws1.write(row, i + 1, "",
+                      fmt_subheader)
         row += 1
 
-    # Financial section
-    ws1.write(row, 0, "FINANCIAL PERFORMANCE",
-              fmt_subheader)
-    for i in range(12):
-        ws1.write(row, i + 1, "", fmt_subheader)
-    row += 1
-
-    fin_indicators = [
-        (f"Billed ({currency})",
-         "total_billed", fmt_number),
-        (f"Collected ({currency})",
-         "total_collected", fmt_number),
-        ("Collection rate (%)",
-         "collection_rate", fmt_decimal),
-        (f"Expenses ({currency})",
-         "total_expenses", fmt_number),
-        (f"Net surplus ({currency})",
-         "net_surplus", fmt_number),
-    ]
-
-    for label, key, fmt in fin_indicators:
-        ws1.write(row, 0, label, fmt_cell)
-        for i in range(1, 13):
-            data = get_report_data(
-                system_id, year, i
-            )
-            ws1.write(row, i, data.get(key, 0), fmt)
-        row += 1
-
-    # Service section
-    ws1.write(row, 0, "SERVICE INDICATORS",
-              fmt_subheader)
-    for i in range(12):
-        ws1.write(row, i + 1, "", fmt_subheader)
-    row += 1
-
-    svc_indicators = [
-        ("Active customers",
-         "total_customers", fmt_number),
-        ("PSP connections",
-         "psp_count", fmt_number),
-        ("Private connections",
-         "private_count", fmt_number),
-        ("Population served (est)",
-         "pop_estimate", fmt_number),
-        ("Per capita (L/person/day)",
-         "per_capita", fmt_decimal),
-    ]
-
-    for label, key, fmt in svc_indicators:
-        ws1.write(row, 0, label, fmt_cell)
-        for i in range(1, 13):
-            data = get_report_data(
-                system_id, year, i
-            )
-            ws1.write(row, i, data.get(key, 0), fmt)
-        row += 1
-
-    # Maintenance section
-    ws1.write(row, 0, "MAINTENANCE",
-              fmt_subheader)
-    for i in range(12):
-        ws1.write(row, i + 1, "", fmt_subheader)
-    row += 1
-
-    maint_indicators = [
-        ("Total incidents",
-         "total_incidents", fmt_number),
-        ("Resolved incidents",
-         "resolved_incidents", fmt_number),
-        (f"Maintenance cost ({currency})",
-         "total_maint_cost", fmt_number),
-    ]
-
-    for label, key, fmt in maint_indicators:
-        ws1.write(row, 0, label, fmt_cell)
-        for i in range(1, 13):
-            data = get_report_data(
-                system_id, year, i
-            )
-            ws1.write(row, i, data.get(key, 0), fmt)
-        row += 1
+        for label, key, fmt in indicators:
+            ws1.write(row, 0, label, fmt_cell)
+            for i in range(1, 13):
+                data = get_report_data(
+                    system_id, year, i
+                )
+                val = data.get(key, 0)
+                if key == "nrw_pct" and val >= 20:
+                    ws1.write(row, i, val, fmt_alert)
+                else:
+                    ws1.write(row, i, val, fmt)
+            row += 1
 
     # ── Sheet 2: DHIS2 Data Entry ──────────────────────
     ws2 = wb.add_worksheet("DHIS2 Data Entry")
-    ws2.set_column("A:A", 35)
-    ws2.set_column("B:B", 20)
+    ws2.set_column("A:A", 38)
+    ws2.set_column("B:B", 18)
     ws2.set_column("C:C", 15)
-    ws2.set_column("D:D", 40)
+    ws2.set_column("D:D", 42)
 
     ws2.merge_range(
         "A1:D1",
@@ -476,22 +421,20 @@ def generate_excel(system_id: int,
     ws2.write(3, 2, "Unit", fmt_header)
     ws2.write(3, 3, "Notes", fmt_header)
 
-    # Get current month data for DHIS2 sheet
-    now       = datetime.now()
+    now        = datetime.now()
     dhis2_data = get_report_data(
         system_id, now.year, now.month
     )
     curr = dhis2_data.get("currency", "UGX")
 
     dhis2_elements = [
-        # Production
         ("", "", "", ""),
         ("WATER PRODUCTION", "", "",
          f"Period: {dhis2_data['period_label']}"),
         ("Volume of water produced",
          dhis2_data["total_pumped"], "m³",
          "From pump house bulk meter"),
-        ("Volume of water consumed/sold",
+        ("Volume of water consumed",
          dhis2_data["total_consumed"], "m³",
          "From tank outlet bulk meter"),
         ("Non-revenue water volume",
@@ -501,54 +444,52 @@ def generate_excel(system_id: int,
          dhis2_data["nrw_pct"], "%",
          "Target: below 20%"),
         ("", "", "", ""),
-
-        # Service
         ("SERVICE COVERAGE", "", "", ""),
-        ("Number of active water connections",
-         dhis2_data["total_customers"], "connections",
-         "Active paying customers"),
-        ("Number of PSP connections",
-         dhis2_data["psp_count"], "connections",
-         "Public stand posts"),
-        ("Number of private connections",
-         dhis2_data["private_count"], "connections",
-         "Household connections"),
-        ("Estimated population served",
-         dhis2_data["pop_estimate"], "persons",
-         "PSP×250 + Private×6"),
+        ("Active water connections",
+         dhis2_data["total_customers"],
+         "connections", "Active customers"),
+        ("PSP connections",
+         dhis2_data["psp_count"],
+         "connections", "Public stand posts"),
+        ("Private connections",
+         dhis2_data["private_count"],
+         "connections", "Household connections"),
+        ("School connections",
+         dhis2_data["school_count"],
+         "connections", "School taps"),
+        ("Population served",
+         dhis2_data["pop_estimate"],
+         "persons",
+         "Actual figures from customer register"),
         ("Per capita water consumption",
-         dhis2_data["per_capita"], "L/person/day",
-         "Target: 20L/person/day"),
+         dhis2_data["per_capita"],
+         "L/person/day", "Target: 20L/person/day"),
         ("", "", "", ""),
-
-        # Financial
         ("FINANCIAL PERFORMANCE", "", "", ""),
         (f"Revenue billed ({curr})",
          dhis2_data["total_billed"], curr,
-         "Total bills issued this period"),
+         "Total bills issued"),
         (f"Revenue collected ({curr})",
          dhis2_data["total_collected"], curr,
          "Actual cash received"),
         ("Revenue collection efficiency",
          dhis2_data["collection_rate"], "%",
          "Target: above 80%"),
-        (f"Total operational expenditure ({curr})",
+        (f"Operational expenditure ({curr})",
          dhis2_data["total_expenses"], curr,
          "All operational costs"),
         (f"Revenue surplus/deficit ({curr})",
          dhis2_data["net_surplus"], curr,
          "Collected minus expenditure"),
         ("", "", "", ""),
-
-        # Maintenance
         ("ASSET MANAGEMENT", "", "", ""),
-        ("Number of maintenance incidents",
-         dhis2_data["total_incidents"], "incidents",
-         "All reported this period"),
-        ("Number of resolved incidents",
-         dhis2_data["resolved_incidents"], "incidents",
-         "Successfully resolved"),
-        (f"Total maintenance cost ({curr})",
+        ("Maintenance incidents",
+         dhis2_data["total_incidents"],
+         "incidents", "All reported"),
+        ("Resolved incidents",
+         dhis2_data["resolved_incidents"],
+         "incidents", "Successfully resolved"),
+        (f"Maintenance cost ({curr})",
          dhis2_data["total_maint_cost"], curr,
          "Labour and materials"),
         ("Average tank level",
@@ -556,58 +497,48 @@ def generate_excel(system_id: int,
          "Average % full from dip readings"),
     ]
 
+    section_keys = [
+        "WATER PRODUCTION", "SERVICE COVERAGE",
+        "FINANCIAL PERFORMANCE", "ASSET MANAGEMENT"
+    ]
+
     for i, (element, value, unit, notes) in \
             enumerate(dhis2_elements):
         r = i + 4
-        if element in [
-            "WATER PRODUCTION",
-            "SERVICE COVERAGE",
-            "FINANCIAL PERFORMANCE",
-            "ASSET MANAGEMENT"
-        ]:
+        if element in section_keys:
             ws2.write(r, 0, element, fmt_subheader)
             ws2.write(r, 1, "", fmt_subheader)
             ws2.write(r, 2, "", fmt_subheader)
             ws2.write(r, 3, notes, fmt_subheader)
         elif element == "":
-            ws2.write(r, 0, "")
-            ws2.write(r, 1, "")
-            ws2.write(r, 2, "")
-            ws2.write(r, 3, "")
+            for col in range(4):
+                ws2.write(r, col, "")
         else:
             ws2.write(r, 0, element, fmt_cell)
             if isinstance(value, (int, float)):
                 ws2.write(r, 1, value, fmt_decimal)
             else:
-                ws2.write(r, 1, value, fmt_cell)
+                ws2.write(r, 1, value or "", fmt_cell)
             ws2.write(r, 2, unit, fmt_cell)
             ws2.write(r, 3, notes, fmt_cell)
 
-    # ── Sheet 3: Customer ledger ───────────────────────
-    session   = get_session()
-    customers = session.query(Customer).filter_by(
-        system_id=system_id, is_active=True
-    ).all()
-    all_bills = session.query(Bill).filter_by(
-        system_id=system_id
-    ).all()
-    session.close()
-
+    # ── Sheet 3: Customer Ledger ───────────────────────
     ws3 = wb.add_worksheet("Customer Ledger")
     ws3.set_column("A:A", 12)
     ws3.set_column("B:B", 28)
-    ws3.set_column("C:C", 12)
-    ws3.set_column("D:F", 16)
-    ws3.set_column("G:G", 12)
+    ws3.set_column("C:D", 14)
+    ws3.set_column("E:G", 16)
+    ws3.set_column("H:H", 12)
 
     ws3.merge_range(
-        "A1:G1",
+        "A1:H1",
         f"Customer Ledger — {sys_name} — {year}",
         fmt_title
     )
 
     headers = [
         "Account", "Customer", "Type",
+        "Population",
         f"Billed ({currency})",
         f"Paid ({currency})",
         f"Outstanding ({currency})",
@@ -616,16 +547,16 @@ def generate_excel(system_id: int,
     for i, h in enumerate(headers):
         ws3.write(2, i, h, fmt_header)
 
-    total_b = total_p = 0
-    for row_idx, c in enumerate(customers):
+    total_b = total_p = total_pop_ws3 = 0
+    for idx, c in enumerate(customers):
         c_bills  = [
             b for b in all_bills
             if b.customer_id == c.id
         ]
-        billed   = sum(b.amount or 0 for b in c_bills)
-        paid     = sum(
-            b.amount_paid or 0 for b in c_bills
-        )
+        billed   = sum(b.amount or 0
+                       for b in c_bills)
+        paid     = sum(b.amount_paid or 0
+                       for b in c_bills)
         owed     = billed - paid
         rate     = round(
             (paid / billed) * 100, 1
@@ -633,36 +564,39 @@ def generate_excel(system_id: int,
         conn     = getattr(
             c, 'connection_type', 'PSP'
         ) or 'PSP'
+        pop      = getattr(c, 'population', 0) or 0
 
-        total_b += billed
-        total_p += paid
+        total_b       += billed
+        total_p       += paid
+        total_pop_ws3 += pop
 
-        ws3.write(row_idx + 3, 0,
+        ws3.write(idx + 3, 0,
                   c.account_no, fmt_cell)
-        ws3.write(row_idx + 3, 1, c.name, fmt_cell)
-        ws3.write(row_idx + 3, 2, conn, fmt_cell)
-        ws3.write(row_idx + 3, 3, billed, fmt_number)
-        ws3.write(row_idx + 3, 4, paid, fmt_number)
-        ws3.write(row_idx + 3, 5, owed, fmt_number)
-        ws3.write(row_idx + 3, 6, rate, fmt_decimal)
+        ws3.write(idx + 3, 1, c.name, fmt_cell)
+        ws3.write(idx + 3, 2, conn, fmt_cell)
+        ws3.write(idx + 3, 3, pop, fmt_number)
+        ws3.write(idx + 3, 4, billed, fmt_number)
+        ws3.write(idx + 3, 5, paid, fmt_number)
+        ws3.write(idx + 3, 6, owed, fmt_number)
+        ws3.write(idx + 3, 7, rate, fmt_decimal)
 
-    # Totals row
     tot_row = len(customers) + 3
+    tot_fmt = wb.add_format({
+        "bold": True, "border": 1,
+        "bg_color": "#0a1628",
+        "font_color": "white"
+    })
+    ws3.write(tot_row, 0, "TOTAL", tot_fmt)
+    ws3.write(tot_row, 1, "", tot_fmt)
+    ws3.write(tot_row, 2, "", tot_fmt)
+    ws3.write(tot_row, 3,
+              total_pop_ws3, fmt_number)
+    ws3.write(tot_row, 4, total_b, fmt_number)
+    ws3.write(tot_row, 5, total_p, fmt_number)
+    ws3.write(tot_row, 6,
+              total_b - total_p, fmt_number)
     ws3.write(
-        tot_row, 0, "TOTAL",
-        wb.add_format({
-            "bold": True, "border": 1
-        })
-    )
-    ws3.write(tot_row, 1, "", fmt_header)
-    ws3.write(tot_row, 2, "", fmt_header)
-    ws3.write(tot_row, 3, total_b, fmt_number)
-    ws3.write(tot_row, 4, total_p, fmt_number)
-    ws3.write(
-        tot_row, 5, total_b - total_p, fmt_number
-    )
-    ws3.write(
-        tot_row, 6,
+        tot_row, 7,
         round(
             (total_p / total_b) * 100, 1
         ) if total_b > 0 else 0,
@@ -737,7 +671,6 @@ def show():
 
     st.divider()
 
-    # ── Fetch report data ──────────────────────────────
     with st.spinner("Compiling report data..."):
         data = get_report_data(
             system_id, year, month
@@ -745,7 +678,7 @@ def show():
 
     period_label = data["period_label"]
 
-    # ── DHIS2 Summary card ─────────────────────────────
+    # ── DHIS2 Summary ──────────────────────────────────
     st.markdown(
         f"### DHIS2 Monthly Summary — {period_label}"
     )
@@ -754,7 +687,6 @@ def show():
         "Share with Water Office for DHIS2 submission."
     )
 
-    # Production KPIs
     st.markdown("#### 💧 Water Production")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -773,16 +705,15 @@ def show():
             f"{data['total_nrw_m3']:.1f} m³"
         )
     with c4:
-        nrw_color = "🔴" \
+        nrw_icon = "🔴" \
             if data["nrw_pct"] >= 20 else "🟢"
         st.metric(
             "NRW rate",
             f"{data['nrw_pct']}%",
-            delta=f"{nrw_color} "
+            delta=f"{nrw_icon} "
                   f"{'ALERT' if data['nrw_pct'] >= 20 else 'OK'}"
         )
 
-    # Service KPIs
     st.markdown("#### 👥 Service Coverage")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -793,7 +724,7 @@ def show():
     with c2:
         st.metric(
             "Population served",
-            f"{data['pop_estimate']:,}"
+            f"{data['pop_estimate']:,}",
         )
     with c3:
         st.metric(
@@ -806,7 +737,6 @@ def show():
             f"{data['avg_tank_pct']}%"
         )
 
-    # Financial KPIs
     st.markdown("#### 💰 Financial Performance")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -820,13 +750,13 @@ def show():
             f"{data['total_collected']:,.0f}"
         )
     with c3:
-        rate_color = "🟢" \
+        rate_icon = "🟢" \
             if data["collection_rate"] >= 80 \
             else "🔴"
         st.metric(
             "Collection rate",
             f"{data['collection_rate']}%",
-            delta=f"{rate_color} "
+            delta=f"{rate_icon} "
                   f"{'Good' if data['collection_rate'] >= 80 else 'Below target'}"
         )
     with c4:
@@ -838,7 +768,6 @@ def show():
             else "Deficit"
         )
 
-    # Maintenance KPIs
     st.markdown("#### 🔧 Asset Management")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -859,120 +788,84 @@ def show():
 
     st.divider()
 
-    # ── DHIS2 formatted table ──────────────────────────
+    # ── DHIS2 table ────────────────────────────────────
     st.markdown("### DHIS2 Data Entry Table")
     st.caption(
-        "Copy these values into your DHIS2 data "
-        "entry form or share with the Water Office."
+        "Copy these values into your DHIS2 "
+        "data entry form."
     )
 
     dhis2_rows = [
-        {
-            "Data Element": "Volume of water produced",
-            "Value":        f"{data['total_pumped']:.1f}",
-            "Unit":         "m³",
-            "Status":       "✓"
-        },
-        {
-            "Data Element": "Volume of water consumed",
-            "Value":        f"{data['total_consumed']:.1f}",
-            "Unit":         "m³",
-            "Status":       "✓"
-        },
-        {
-            "Data Element": "Non-revenue water volume",
-            "Value":        f"{data['total_nrw_m3']:.1f}",
-            "Unit":         "m³",
-            "Status":       "✓"
-        },
-        {
-            "Data Element": "Non-revenue water rate",
-            "Value":        f"{data['nrw_pct']}",
-            "Unit":         "%",
-            "Status":       "🔴 ALERT"
-                            if data["nrw_pct"] >= 20
-                            else "🟢 OK"
-        },
-        {
-            "Data Element": "Active water connections",
-            "Value":        str(data["total_customers"]),
-            "Unit":         "connections",
-            "Status":       "✓"
-        },
-        {
-            "Data Element": "Population served (est)",
-            "Value":        f"{data['pop_estimate']:,}",
-            "Unit":         "persons",
-            "Status":       "✓"
-        },
-        {
-            "Data Element": "Per capita consumption",
-            "Value":        f"{data['per_capita']}",
-            "Unit":         "L/person/day",
-            "Status":       "✓"
-        },
-        {
-            "Data Element": f"Revenue billed ({currency})",
-            "Value":        f"{data['total_billed']:,.0f}",
-            "Unit":         currency,
-            "Status":       "✓"
-        },
-        {
-            "Data Element": f"Revenue collected ({currency})",
-            "Value":        f"{data['total_collected']:,.0f}",
-            "Unit":         currency,
-            "Status":       "✓"
-        },
-        {
-            "Data Element": "Collection efficiency",
-            "Value":        f"{data['collection_rate']}",
-            "Unit":         "%",
-            "Status":       "🟢 Good"
-                            if data["collection_rate"] >= 80
-                            else "🔴 Below target"
-        },
-        {
-            "Data Element": f"Operational expenditure ({currency})",
-            "Value":        f"{data['total_expenses']:,.0f}",
-            "Unit":         currency,
-            "Status":       "✓"
-        },
-        {
-            "Data Element": f"Revenue surplus ({currency})",
-            "Value":        f"{data['net_surplus']:,.0f}",
-            "Unit":         currency,
-            "Status":       "Surplus"
-                            if data["net_surplus"] >= 0
-                            else "Deficit"
-        },
-        {
-            "Data Element": "Maintenance incidents",
-            "Value":        str(data["total_incidents"]),
-            "Unit":         "incidents",
-            "Status":       "✓"
-        },
-        {
-            "Data Element": "Resolved incidents",
-            "Value":        str(
-                data["resolved_incidents"]
-            ),
-            "Unit":         "incidents",
-            "Status":       "✓"
-        },
-        {
-            "Data Element": f"Maintenance cost ({currency})",
-            "Value":        f"{data['total_maint_cost']:,.0f}",
-            "Unit":         currency,
-            "Status":       "✓"
-        },
-        {
-            "Data Element": "Average tank level",
-            "Value":        f"{data['avg_tank_pct']}",
-            "Unit":         "%",
-            "Status":       "✓"
-                            if data["avg_tank_pct"] > 20
-                            else "🔴 Low"
-        },
+        {"Data Element": "Volume of water produced",
+         "Value": f"{data['total_pumped']:.1f}",
+         "Unit": "m³", "Status": "✓"},
+        {"Data Element": "Volume of water consumed",
+         "Value": f"{data['total_consumed']:.1f}",
+         "Unit": "m³", "Status": "✓"},
+        {"Data Element": "Non-revenue water volume",
+         "Value": f"{data['total_nrw_m3']:.1f}",
+         "Unit": "m³", "Status": "✓"},
+        {"Data Element": "Non-revenue water rate",
+         "Value": f"{data['nrw_pct']}",
+         "Unit": "%",
+         "Status": "🔴 ALERT"
+                   if data["nrw_pct"] >= 20
+                   else "🟢 OK"},
+        {"Data Element": "Active connections",
+         "Value": str(data["total_customers"]),
+         "Unit": "connections", "Status": "✓"},
+        {"Data Element": "PSP connections",
+         "Value": str(data["psp_count"]),
+         "Unit": "connections", "Status": "✓"},
+        {"Data Element": "Private connections",
+         "Value": str(data["private_count"]),
+         "Unit": "connections", "Status": "✓"},
+        {"Data Element": "School connections",
+         "Value": str(data["school_count"]),
+         "Unit": "connections", "Status": "✓"},
+        {"Data Element": "Population served",
+         "Value": f"{data['pop_estimate']:,}",
+         "Unit": "persons",
+         "Status": "✓ Actual figures"},
+        {"Data Element": "Per capita consumption",
+         "Value": f"{data['per_capita']}",
+         "Unit": "L/person/day", "Status": "✓"},
+        {"Data Element": f"Revenue billed ({currency})",
+         "Value": f"{data['total_billed']:,.0f}",
+         "Unit": currency, "Status": "✓"},
+        {"Data Element": f"Revenue collected ({currency})",
+         "Value": f"{data['total_collected']:,.0f}",
+         "Unit": currency, "Status": "✓"},
+        {"Data Element": "Collection efficiency",
+         "Value": f"{data['collection_rate']}",
+         "Unit": "%",
+         "Status": "🟢 Good"
+                   if data["collection_rate"] >= 80
+                   else "🔴 Below target"},
+        {"Data Element": f"Expenditure ({currency})",
+         "Value": f"{data['total_expenses']:,.0f}",
+         "Unit": currency, "Status": "✓"},
+        {"Data Element": f"Net surplus ({currency})",
+         "Value": f"{data['net_surplus']:,.0f}",
+         "Unit": currency,
+         "Status": "Surplus"
+                   if data["net_surplus"] >= 0
+                   else "Deficit"},
+        {"Data Element": "Maintenance incidents",
+         "Value": str(data["total_incidents"]),
+         "Unit": "incidents", "Status": "✓"},
+        {"Data Element": "Resolved incidents",
+         "Value": str(data["resolved_incidents"]),
+         "Unit": "incidents", "Status": "✓"},
+        {"Data Element": f"Maintenance cost ({currency})",
+         "Value": f"{data['total_maint_cost']:,.0f}",
+         "Unit": currency, "Status": "✓"},
+        {"Data Element": "Average tank level",
+         "Value": f"{data['avg_tank_pct']}",
+         "Unit": "%",
+         "Status": "✓"
+                   if data["avg_tank_pct"] > 20
+                   else "🔴 Low"},
     ]
 
     st.dataframe(
@@ -985,7 +878,6 @@ def show():
 
     # ── Export buttons ─────────────────────────────────
     st.markdown("### Export")
-
     col1, col2 = st.columns(2)
 
     with col1:
@@ -993,17 +885,23 @@ def show():
         st.caption(
             "Full annual report with monthly "
             "breakdown, DHIS2 data entry sheet "
-            "and customer ledger."
+            "and customer ledger with population."
         )
         with st.spinner("Generating Excel..."):
             excel_data = generate_excel(
                 system_id, year
             )
+        fname = (
+            f"Maji360_"
+            f"{system_name.replace(' ', '_')}"
+            f"_{year}.xlsx"
+        )
         st.download_button(
             label    = "⬇️ Download Excel report",
             data     = excel_data,
-            file_name = f"Maji360_{system_name.replace(' ', '_')}_{year}.xlsx",
-            mime     = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            file_name = fname,
+            mime     = "application/vnd.openxmlformats-"
+                       "officedocument.spreadsheetml.sheet",
             use_container_width=True,
             type     = "primary"
         )
@@ -1012,8 +910,7 @@ def show():
         st.markdown("**📋 CSV export**")
         st.caption(
             "Simple CSV of all DHIS2 indicators "
-            "for the selected period. "
-            "Easy to copy and paste."
+            "for the selected period."
         )
         csv_rows = []
         for r in dhis2_rows:
@@ -1027,10 +924,15 @@ def show():
         csv_data = pd.DataFrame(
             csv_rows
         ).to_csv(index=False)
+        fname_csv = (
+            f"Maji360_DHIS2_"
+            f"{system_name.replace(' ', '_')}_"
+            f"{period_label.replace(' ', '_')}.csv"
+        )
         st.download_button(
             label    = "⬇️ Download CSV",
             data     = csv_data,
-            file_name = f"Maji360_DHIS2_{system_name.replace(' ', '_')}_{period_label.replace(' ', '_')}.csv",
+            file_name = fname_csv,
             mime     = "text/csv",
             use_container_width=True
         )
