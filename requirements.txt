@@ -8,3 +8,5 @@ plotly
 pandas
 openpyxl
 xlsxwriter
+folium
+streamlit-folium
