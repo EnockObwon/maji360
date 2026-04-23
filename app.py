@@ -251,15 +251,16 @@ def show_sidebar():
         st.divider()
         st.markdown("**Navigation**")
         pages = {
-            "🏠  Home":           "Home",
-            "📉  NRW Report":     "NRW",
-            "💰  Billing":        "Billing",
-            "📊  Financial":      "Financial",
-            "⚙️  Operations":     "Operations",
-            "📋  Field Ops":      "FieldOps",
-            "💵  Customer Billing": "CustomerBilling",
-            "🗺️  Map":            "Map",
-            "🔄  Sync":           "Sync",
+            "🏠  Home":              "Home",
+            "📉  NRW Report":        "NRW",
+            "💰  Billing":           "Billing",
+            "📊  Financial":         "Financial",
+            "⚙️  Operations":        "Operations",
+            "📋  Field Ops":         "FieldOps",
+            "💵  Customer Billing":  "CustomerBilling",
+            "🔧  Maintenance":       "Maintenance",
+            "🗺️  Map":               "Map",
+            "🔄  Sync":              "Sync",
         }
         if user.get("role") == "super_admin":
             pages["🔧  System Setup"] = "SystemSetup"
