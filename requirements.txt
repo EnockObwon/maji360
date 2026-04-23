@@ -1,10 +1,10 @@
 streamlit
 sqlalchemy
-pandas
-plotly
-folium
-streamlit-folium
-africastalking
+psycopg2-binary
 bcrypt
 requests
-psycopg2-binary
+africastalking
+plotly
+pandas
+openpyxl
+xlsxwriter
