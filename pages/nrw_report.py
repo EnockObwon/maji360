@@ -132,7 +132,32 @@ def show():
         system_id
     )
     has_adjusted = len(storage_changes) > 0
+def get_maintenance_events(system_id: int) -> dict:
+    """
+    Fetch maintenance events grouped by month.
+    Returns dict of month -> list of events
+    for annotation on NRW chart.
+    """
+    session = get_session()
+    try:
+        rows = session.execute(sql_text(
+            "SELECT incident_date, category, "
+            "status FROM maintenance "
+            "WHERE system_id = :sid "
+            "ORDER BY incident_date"
+        ), {"sid": system_id}).fetchall()
+        result = [dict(r._mapping) for r in rows]
+    except Exception:
+        result = []
+    session.close()
 
+    events_by_month = defaultdict(list)
+    for r in result:
+        month = str(r["incident_date"])[:7]
+        events_by_month[month].append(
+            r["category"]
+        )
+    return dict(events_by_month)
     # ── Calculate adjusted NRW per month ───────────────
     adj_nrw_pct = []
     adj_nrw_m3  = []
