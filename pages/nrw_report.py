@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from core.database import get_session, DailyReading, NRWRecord
+from core.database import get_session, DailyReading
 from core.auth import require_login
 from collections import defaultdict
 from sqlalchemy import text as sql_text
@@ -10,14 +10,14 @@ from sqlalchemy import text as sql_text
 def get_tank_levels(system_id: int) -> dict:
     """
     Fetch tank level readings and calculate
-    monthly storage changes.
+    storage change per month.
+    Uses consecutive readings across all months.
     Returns dict of month -> storage_change_m3
     """
     session = get_session()
     try:
         levels = session.execute(sql_text(
-            "SELECT DATE(reading_date) as rdate, "
-            "volume_m3 "
+            "SELECT reading_date, volume_m3 "
             "FROM tank_levels "
             "WHERE system_id = :sid "
             "ORDER BY reading_date"
@@ -26,46 +26,27 @@ def get_tank_levels(system_id: int) -> dict:
         levels = []
     session.close()
 
-    if not levels:
+    if len(levels) < 2:
         return {}
 
-    # Group by month — use first and last reading
-    # of each month to calculate storage change
-    monthly_levels = defaultdict(list)
-    for l in levels:
-        date_str = str(l[0])[:10]
-        month    = date_str[:7]
-        monthly_levels[month].append(l[1])
+    # Build list of (date, volume) pairs
+    readings = [
+        (str(l[0])[:10], float(l[1]))
+        for l in levels
+    ]
 
-    # Calculate storage change per month
-    # Change = last reading − first reading
-    # Positive = tank filling (reduces NRW)
-    # Negative = tank draining (increases NRW)
-    storage_changes = {}
-    months = sorted(monthly_levels.keys())
+    # Calculate storage change between consecutive
+    # readings and assign to the month of the
+    # later reading
+    storage_changes = defaultdict(float)
+    for i in range(1, len(readings)):
+        prev_date, prev_vol = readings[i - 1]
+        curr_date, curr_vol = readings[i]
+        change = round(curr_vol - prev_vol, 2)
+        month  = curr_date[:7]
+        storage_changes[month] += change
 
-    for i, month in enumerate(months):
-        month_readings = monthly_levels[month]
-        if len(month_readings) >= 2:
-            # Use first and last reading of month
-            start_vol = month_readings[0]
-            end_vol   = month_readings[-1]
-            storage_changes[month] = round(
-                end_vol - start_vol, 2
-            )
-        elif i > 0:
-            # Use last reading of previous month
-            # vs first reading of this month
-            prev_month   = months[i - 1]
-            prev_readings = monthly_levels[prev_month]
-            if prev_readings:
-                prev_vol = prev_readings[-1]
-                curr_vol = month_readings[0]
-                storage_changes[month] = round(
-                    curr_vol - prev_vol, 2
-                )
-
-    return storage_changes
+    return dict(storage_changes)
 
 
 def show():
@@ -117,34 +98,46 @@ def show():
             monthly[month]["consumed"] += \
                 r.water_consumed_m3
 
-    months   = sorted(monthly.keys())
-    pumped   = [round(monthly[m]["pumped"],   1)
-                for m in months]
-    consumed = [round(monthly[m]["consumed"], 1)
-                for m in months]
-    nrw_m3   = [round(p - c, 1)
-                for p, c in zip(pumped, consumed)]
-    nrw_pct  = [round((n / p) * 100, 1)
-                if p > 0 else 0
-                for n, p in zip(nrw_m3, pumped)]
+    # Only include months with pump data
+    months = sorted(
+        m for m in monthly.keys()
+        if monthly[m]["pumped"] > 0
+    )
+
+    if not months:
+        st.info("No pump readings available yet.")
+        return
+
+    pumped   = [
+        round(monthly[m]["pumped"],   1)
+        for m in months
+    ]
+    consumed = [
+        round(monthly[m]["consumed"], 1)
+        for m in months
+    ]
+    nrw_m3   = [
+        round(p - c, 1)
+        for p, c in zip(pumped, consumed)
+    ]
+    nrw_pct  = [
+        round((n / p) * 100, 1)
+        if p > 0 else 0
+        for n, p in zip(nrw_m3, pumped)
+    ]
 
     # ── Get tank level storage changes ─────────────────
     storage_changes = get_tank_levels(system_id)
+    has_adjusted    = len(storage_changes) > 0
 
     # ── Calculate adjusted NRW ─────────────────────────
     adj_nrw_m3  = []
     adj_nrw_pct = []
-    has_adjusted = False
 
     for i, month in enumerate(months):
         if month in storage_changes:
-            has_adjusted = True
-            change = storage_changes[month]
-            # Adjusted NRW = Operational NRW - 
-            # storage increase
-            # If tank filled (+change) → less real NRW
-            # If tank drained (-change) → more real NRW
-            adj = round(nrw_m3[i] - change, 1)
+            change  = storage_changes[month]
+            adj     = round(nrw_m3[i] - change, 1)
             adj_pct = round(
                 (adj / pumped[i]) * 100, 1
             ) if pumped[i] > 0 else 0
@@ -172,14 +165,17 @@ def show():
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("Total pumped",
-                  f"{total_pumped:.0f} m³")
+        st.metric(
+            "Total pumped",
+            f"{total_pumped:.0f} m³"
+        )
     with c2:
-        st.metric("Total consumed",
-                  f"{total_consumed:.0f} m³")
+        st.metric(
+            "Total consumed",
+            f"{total_consumed:.0f} m³"
+        )
     with c3:
-        st.metric("Overall NRW",
-                  f"{overall_nrw}%")
+        st.metric("Overall NRW", f"{overall_nrw}%")
     with c4:
         if latest_adj is not None:
             st.metric(
@@ -188,22 +184,21 @@ def show():
                 delta=f"{round(latest_adj - latest_nrw, 1)}% vs operational"
             )
         else:
-            st.metric("Latest NRW",
-                      f"{latest_nrw}%")
+            st.metric(
+                "Latest NRW", f"{latest_nrw}%"
+            )
 
     if has_adjusted:
         st.info(
             "ℹ️ Adjusted NRW accounts for changes "
-            "in tank storage level. Months without "
-            "tank level readings show operational "
-            "NRW only."
+            "in tank storage. Orange dotted line "
+            "shows adjusted NRW where tank level "
+            "data is available."
         )
     else:
         st.info(
-            "ℹ️ Tank level readings not yet available "
-            "for NRW adjustment. Record daily tank "
-            "level dips in Field Ops to enable "
-            "adjusted NRW."
+            "ℹ️ Record daily tank level dips in "
+            "Field Ops to enable adjusted NRW."
         )
 
     st.divider()
@@ -213,8 +208,16 @@ def show():
     st.caption(
         "Blue = pumped · Green = to consumers · "
         "Red line = operational NRW % · "
-        "Orange line = adjusted NRW % (where available)"
+        "Orange dotted = adjusted NRW %"
     )
+
+    adj_months = [
+        m for m, v in zip(months, adj_nrw_pct)
+        if v is not None
+    ]
+    adj_vals = [
+        v for v in adj_nrw_pct if v is not None
+    ]
 
     fig1 = go.Figure()
     fig1.add_trace(go.Bar(
@@ -232,13 +235,13 @@ def show():
         opacity      = 0.8
     ))
     fig1.add_trace(go.Scatter(
-        name       = "Operational NRW %",
-        x          = months,
-        y          = nrw_pct,
-        mode       = "lines+markers",
-        yaxis      = "y2",
-        line       = dict(color="#ef4444", width=2.5),
-        marker     = dict(
+        name   = "Operational NRW %",
+        x      = months,
+        y      = nrw_pct,
+        mode   = "lines+markers",
+        yaxis  = "y2",
+        line   = dict(color="#ef4444", width=2.5),
+        marker = dict(
             size  = 8,
             color = [
                 "#ef4444" if p >= 20 else
@@ -246,34 +249,24 @@ def show():
                 "#22c55e"
                 for p in nrw_pct
             ],
-            line  = dict(color="white", width=1.5)
+            line = dict(color="white", width=1.5)
         )
     ))
 
-    # Add adjusted NRW line if data exists
-    if has_adjusted:
-        adj_months = [
-            m for m, v in zip(months, adj_nrw_pct)
-            if v is not None
-        ]
-        adj_vals = [
-            v for v in adj_nrw_pct
-            if v is not None
-        ]
-        if adj_months:
-            fig1.add_trace(go.Scatter(
-                name   = "Adjusted NRW %",
-                x      = adj_months,
-                y      = adj_vals,
-                mode   = "lines+markers",
-                yaxis  = "y2",
-                line   = dict(
-                    color="#f97316",
-                    width=2.5,
-                    dash="dot"
-                ),
-                marker = dict(size=8)
-            ))
+    if has_adjusted and adj_months:
+        fig1.add_trace(go.Scatter(
+            name   = "Adjusted NRW %",
+            x      = adj_months,
+            y      = adj_vals,
+            mode   = "lines+markers",
+            yaxis  = "y2",
+            line   = dict(
+                color="#f97316",
+                width=2.5,
+                dash="dot"
+            ),
+            marker = dict(size=8)
+        ))
 
     fig1.add_hline(
         y                   = 20,
@@ -284,6 +277,7 @@ def show():
         annotation_position = "top right",
         yref                = "y2"
     )
+    max_nrw = max(nrw_pct) if nrw_pct else 100
     fig1.update_layout(
         barmode       = "group",
         height        = 400,
@@ -298,13 +292,13 @@ def show():
             title      = "NRW %",
             overlaying = "y",
             side       = "right",
-            range      = [
-                0,
-                max(nrw_pct) * 1.3 + 10
-            ] if nrw_pct else [0, 100],
+            range      = [0, max_nrw * 1.3 + 10],
             showgrid   = False
         ),
-        xaxis  = dict(gridcolor="#f1f5f9"),
+        xaxis  = dict(
+            gridcolor = "#f1f5f9",
+            type      = "category"
+        ),
         legend = dict(
             orientation = "h",
             yanchor     = "bottom",
@@ -369,7 +363,10 @@ def show():
             title     = "NRW %",
             gridcolor = "#f1f5f9"
         ),
-        xaxis  = dict(gridcolor="#f1f5f9"),
+        xaxis  = dict(
+            gridcolor = "#f1f5f9",
+            type      = "category"
+        ),
         legend = dict(
             orientation = "h",
             yanchor     = "bottom",
@@ -394,7 +391,7 @@ def show():
             "🟡 WARN"  if nrw_pct[i] >= 15 else
             "🟢 OK"
         )
-        row = {
+        rows.append({
             "Month":        month,
             "Pumped m³":    pumped[i],
             "Consumed m³":  consumed[i],
@@ -403,12 +400,11 @@ def show():
             "Storage Δ m³": f"{storage:+.1f}"
                             if storage is not None
                             else "—",
-            "Adj NRW %":   f"{adj_pct}%"
-                           if adj_pct is not None
-                           else "—",
+            "Adj NRW %":    f"{adj_pct}%"
+                            if adj_pct is not None
+                            else "—",
             "Status":       status
-        }
-        rows.append(row)
+        })
 
     st.dataframe(
         pd.DataFrame(rows),
@@ -440,19 +436,20 @@ def show():
             m for m in months if m[:4] == year
         ]
         yr_pumped   = sum(
-            monthly[m]["pumped"] for m in year_months
+            monthly[m]["pumped"]
+            for m in year_months
         )
         yr_consumed = sum(
             monthly[m]["consumed"]
             for m in year_months
         )
-        yr_nrw      = round(yr_pumped - yr_consumed, 1)
-        yr_pct      = round(
+        yr_nrw  = round(yr_pumped - yr_consumed, 1)
+        yr_pct  = round(
             (yr_nrw / yr_pumped) * 100, 1
         ) if yr_pumped > 0 else 0
-        status      = (
-            "🔴 AL..." if yr_pct >= 20 else
-            "🟡 WA..." if yr_pct >= 15 else
+        status  = (
+            "🔴 ALERT" if yr_pct >= 20 else
+            "🟡 WARN"  if yr_pct >= 15 else
             "🟢 OK"
         )
         with cols[i]:
