@@ -124,6 +124,7 @@ class Customer(Base):
     address           = Column(String)
     meter_no          = Column(String)
     connection_type   = Column(String, default="PSP")
+    population        = Column(Integer, default=0)
     opening_reading   = Column(Float, default=0.0)
     last_reading      = Column(Float, default=0.0)
     last_reading_date = Column(DateTime)
