@@ -327,6 +327,7 @@ def show_sidebar():
             "📉  NRW Report":       "NRW",
             "💰  Billing":          "Billing",
             "📊  Financial":        "Financial",
+            "📄  Reports":          "Reports",
             "⚙️  Operations":       "Operations",
             "📋  Field Ops":        "FieldOps",
             "💵  Customer Billing": "CustomerBilling",
