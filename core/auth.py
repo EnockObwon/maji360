@@ -1,6 +1,7 @@
 import bcrypt
 import streamlit as st
 from core.database import get_session, User, WaterSystem
+from sqlalchemy import text as sql_text
 
 
 def hash_password(plain: str) -> str:
@@ -11,12 +12,44 @@ def hash_password(plain: str) -> str:
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:
-        return bcrypt.checkpw(plain.encode(), hashed.encode())
+        return bcrypt.checkpw(
+            plain.encode(), hashed.encode()
+        )
     except Exception:
         return False
 
 
-def login(email: str, password: str) -> dict | None:
+def get_user_accessible_systems(user_id: int) -> list:
+    """
+    Get all systems a user can access
+    from user_systems table.
+    """
+    session = get_session()
+    try:
+        rows = session.execute(sql_text("""
+            SELECT ws.id, ws.name, ws.currency
+            FROM user_systems us
+            JOIN water_systems ws
+                ON us.system_id = ws.id
+            WHERE us.user_id = :uid
+            AND ws.is_active = true
+            ORDER BY ws.name
+        """), {"uid": user_id}).fetchall()
+        result = [
+            {
+                "id":       row[0],
+                "name":     row[1],
+                "currency": row[2]
+            }
+            for row in rows
+        ]
+    except Exception:
+        result = []
+    session.close()
+    return result
+
+
+def login(email: str, password: str):
     session = get_session()
     user    = session.query(User).filter_by(
         email=email, is_active=True
@@ -29,36 +62,39 @@ def login(email: str, password: str) -> dict | None:
         session.close()
         return None
 
-    # Check approval status
     is_approved = getattr(user, 'is_approved', True)
     if not is_approved:
         session.close()
         return "pending"
 
-    result = {
-        "id":          user.id,
-        "name":        user.name,
-        "email":       user.email,
-        "role":        user.role,
-        "system_id":   user.system_id,
-        "system_name": user.system.name
-                       if user.system else "All Systems"
-    }
+    # Get accessible systems
+    user_id  = user.id
+    role     = user.role
+    name     = user.name
+    email_   = user.email
+    sys_id   = user.system_id
+    sys_name = user.system.name \
+               if user.system else "All Systems"
     session.close()
+
+    accessible = get_user_accessible_systems(user_id)
+
+    result = {
+        "id":          user_id,
+        "name":        name,
+        "email":       email_,
+        "role":        role,
+        "system_id":   sys_id,
+        "system_name": sys_name,
+        "systems":     accessible
+    }
     return result
 
 
 def register_viewer(name: str, email: str,
                     password: str,
                     system_id: int = None) -> dict:
-    """
-    Register a new viewer account.
-    Account is inactive until approved by admin.
-    Returns dict with status and message.
-    """
-    session = get_session()
-
-    # Check if email already exists
+    session  = get_session()
     existing = session.query(User).filter_by(
         email=email
     ).first()
@@ -66,7 +102,8 @@ def register_viewer(name: str, email: str,
         session.close()
         return {
             "success": False,
-            "message": "An account with this email already exists."
+            "message": "An account with this email "
+                       "already exists."
         }
 
     try:
@@ -81,12 +118,29 @@ def register_viewer(name: str, email: str,
         )
         session.add(user)
         session.commit()
+
+        # Add to user_systems table
+        if system_id:
+            try:
+                session.execute(sql_text("""
+                    INSERT INTO user_systems
+                        (user_id, system_id)
+                    VALUES (:uid, :sid)
+                    ON CONFLICT DO NOTHING
+                """), {
+                    "uid": user.id,
+                    "sid": system_id
+                })
+                session.commit()
+            except Exception:
+                pass
+
         session.close()
         return {
             "success": True,
             "message": "Registration successful. "
-                       "Your account is pending approval "
-                       "by the administrator."
+                       "Your account is pending "
+                       "approval by the administrator."
         }
     except Exception as e:
         session.close()
@@ -108,6 +162,14 @@ def is_super_admin() -> bool:
     ).get("role") == "super_admin"
 
 
+def is_system_admin() -> bool:
+    return st.session_state.get(
+        "user", {}
+    ).get("role") in [
+        "super_admin", "system_admin"
+    ]
+
+
 def is_operator() -> bool:
     return st.session_state.get(
         "user", {}
@@ -119,7 +181,9 @@ def is_operator() -> bool:
 def get_user_system_id():
     user = st.session_state.get("user", {})
     if user.get("role") == "super_admin":
-        return st.session_state.get("selected_system_id")
+        return st.session_state.get(
+            "selected_system_id"
+        )
     return user.get("system_id")
 
 
@@ -130,12 +194,17 @@ def get_accessible_systems() -> list:
         systems = session.query(WaterSystem).filter_by(
             is_active=True
         ).all()
+        result = [
+            {
+                "id":       s.id,
+                "name":     s.name,
+                "currency": s.currency
+            }
+            for s in systems
+        ]
     else:
-        systems = session.query(WaterSystem).filter_by(
-            id=user.get("system_id"), is_active=True
-        ).all()
-    result = [{"id": s.id, "name": s.name,
-               "currency": s.currency}
-              for s in systems]
+        result = get_user_accessible_systems(
+            user.get("id")
+        )
     session.close()
     return result
