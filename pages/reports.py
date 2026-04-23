@@ -11,22 +11,6 @@ from collections import defaultdict
 from sqlalchemy import text as sql_text
 
 
-def get_total_population(system_id: int) -> int:
-    """
-    Get total population served from customer
-    population field — actual figures not estimates.
-    """
-    session = get_session()
-    customers = session.query(Customer).filter_by(
-        system_id=system_id, is_active=True
-    ).all()
-    session.close()
-    return sum(
-        getattr(c, 'population', 0) or 0
-        for c in customers
-    )
-
-
 def get_report_data(system_id: int,
                     year: int,
                     month: int = None) -> dict:
@@ -48,7 +32,7 @@ def get_report_data(system_id: int,
         ]
         period_label = str(year)
 
-    # Production
+    # ── Production ─────────────────────────────────────
     readings = session.query(DailyReading).filter(
         DailyReading.system_id == system_id
     ).all()
@@ -82,28 +66,33 @@ def get_report_data(system_id: int,
         (total_nrw_m3 / total_pumped) * 100, 1
     ) if total_pumped > 0 else 0
 
-    # Customers and population
-    customers       = session.query(Customer).filter_by(
+    # ── Customers and population ───────────────────────
+    customers = session.query(Customer).filter_by(
         system_id=system_id, is_active=True
     ).all()
-    total_customers = len(customers)
-    psp_count       = sum(
+    total_customers   = len(customers)
+    psp_count         = sum(
         1 for c in customers
         if getattr(c, 'connection_type', 'PSP')
         == 'PSP'
     )
-    private_count   = sum(
+    private_count     = sum(
         1 for c in customers
         if getattr(c, 'connection_type', 'PSP')
         == 'Private'
     )
-    school_count    = sum(
+    school_count      = sum(
         1 for c in customers
         if getattr(c, 'connection_type', 'PSP')
         == 'School'
     )
+    institution_count = sum(
+        1 for c in customers
+        if getattr(c, 'connection_type', 'PSP')
+        == 'Institution'
+    )
 
-    # Use actual population from database
+    # Actual population from database
     pop_estimate = sum(
         getattr(c, 'population', 0) or 0
         for c in customers
@@ -116,7 +105,7 @@ def get_report_data(system_id: int,
         (pop_estimate * days), 1
     ) if pop_estimate > 0 and days > 0 else 0
 
-    # Billing
+    # ── Billing ────────────────────────────────────────
     all_bills    = session.query(Bill).filter_by(
         system_id=system_id
     ).all()
@@ -134,14 +123,14 @@ def get_report_data(system_id: int,
         (total_collected / total_billed) * 100, 1
     ) if total_billed > 0 else 0
 
-    # Expenses
+    # ── Expenses ───────────────────────────────────────
     try:
         if month:
             exp_rows = session.execute(sql_text(
                 "SELECT SUM(amount) FROM expenses "
                 "WHERE system_id = :sid "
                 "AND month = :month"
-            ), {"sid": system_id,
+            ), {"sid":   system_id,
                 "month": period}).fetchone()
         else:
             exp_rows = session.execute(sql_text(
@@ -158,7 +147,7 @@ def get_report_data(system_id: int,
         total_collected - total_expenses, 0
     )
 
-    # Maintenance
+    # ── Maintenance ────────────────────────────────────
     try:
         if month:
             maint_rows = session.execute(sql_text(
@@ -193,7 +182,7 @@ def get_report_data(system_id: int,
         resolved_incidents = 0
         total_maint_cost   = 0.0
 
-    # Tank level
+    # ── Tank level ─────────────────────────────────────
     try:
         tank_rows = session.execute(sql_text(
             "SELECT AVG(pct_full) "
@@ -229,6 +218,7 @@ def get_report_data(system_id: int,
         "psp_count":         psp_count,
         "private_count":     private_count,
         "school_count":      school_count,
+        "institution_count": institution_count,
         "pop_estimate":      pop_estimate,
         "per_capita":        per_capita,
         "total_billed":      round(total_billed, 0),
@@ -245,12 +235,12 @@ def get_report_data(system_id: int,
 
 def generate_excel(system_id: int,
                    year: int) -> bytes:
-    session  = get_session()
-    system   = session.query(WaterSystem).filter_by(
+    session   = get_session()
+    system    = session.query(WaterSystem).filter_by(
         id=system_id
     ).first()
-    currency = system.currency if system else "UGX"
-    sys_name = system.name if system else ""
+    currency  = system.currency if system else "UGX"
+    sys_name  = system.name if system else ""
     customers = session.query(Customer).filter_by(
         system_id=system_id, is_active=True
     ).all()
@@ -314,7 +304,8 @@ def generate_excel(system_id: int,
     )
     ws1.merge_range(
         "A2:M2",
-        f"Generated: {datetime.now().strftime('%d %b %Y %H:%M')}",
+        f"Generated: "
+        f"{datetime.now().strftime('%d %b %Y %H:%M')}",
         wb.add_format({
             "align": "center",
             "font_color": "#64748b",
@@ -330,13 +321,14 @@ def generate_excel(system_id: int,
 
     sections = [
         ("WATER PRODUCTION", [
-            ("Pumped (m³)", "total_pumped",
-             fmt_decimal),
-            ("Consumed (m³)", "total_consumed",
-             fmt_decimal),
-            ("NRW (m³)", "total_nrw_m3",
-             fmt_decimal),
-            ("NRW (%)", "nrw_pct", fmt_decimal),
+            ("Pumped (m³)",
+             "total_pumped", fmt_decimal),
+            ("Consumed (m³)",
+             "total_consumed", fmt_decimal),
+            ("NRW (m³)",
+             "total_nrw_m3", fmt_decimal),
+            ("NRW (%)",
+             "nrw_pct", fmt_decimal),
         ]),
         ("SERVICE COVERAGE", [
             ("Active connections",
@@ -347,6 +339,8 @@ def generate_excel(system_id: int,
              "private_count", fmt_number),
             ("School connections",
              "school_count", fmt_number),
+            ("Institution connections",
+             "institution_count", fmt_number),
             ("Population served",
              "pop_estimate", fmt_number),
             ("Per capita (L/p/day)",
@@ -381,7 +375,6 @@ def generate_excel(system_id: int,
             ws1.write(row, i + 1, "",
                       fmt_subheader)
         row += 1
-
         for label, key, fmt in indicators:
             ws1.write(row, 0, label, fmt_cell)
             for i in range(1, 13):
@@ -390,7 +383,9 @@ def generate_excel(system_id: int,
                 )
                 val = data.get(key, 0)
                 if key == "nrw_pct" and val >= 20:
-                    ws1.write(row, i, val, fmt_alert)
+                    ws1.write(
+                        row, i, val, fmt_alert
+                    )
                 else:
                     ws1.write(row, i, val, fmt)
             row += 1
@@ -447,7 +442,7 @@ def generate_excel(system_id: int,
         ("SERVICE COVERAGE", "", "", ""),
         ("Active water connections",
          dhis2_data["total_customers"],
-         "connections", "Active customers"),
+         "connections", "All active customers"),
         ("PSP connections",
          dhis2_data["psp_count"],
          "connections", "Public stand posts"),
@@ -457,13 +452,18 @@ def generate_excel(system_id: int,
         ("School connections",
          dhis2_data["school_count"],
          "connections", "School taps"),
+        ("Institution connections",
+         dhis2_data["institution_count"],
+         "connections",
+         "Staff quarters, health centres etc"),
         ("Population served",
          dhis2_data["pop_estimate"],
          "persons",
          "Actual figures from customer register"),
         ("Per capita water consumption",
          dhis2_data["per_capita"],
-         "L/person/day", "Target: 20L/person/day"),
+         "L/person/day",
+         "Target: 20L/person/day"),
         ("", "", "", ""),
         ("FINANCIAL PERFORMANCE", "", "", ""),
         (f"Revenue billed ({curr})",
@@ -518,7 +518,8 @@ def generate_excel(system_id: int,
             if isinstance(value, (int, float)):
                 ws2.write(r, 1, value, fmt_decimal)
             else:
-                ws2.write(r, 1, value or "", fmt_cell)
+                ws2.write(r, 1,
+                          value or "", fmt_cell)
             ws2.write(r, 2, unit, fmt_cell)
             ws2.write(r, 3, notes, fmt_cell)
 
@@ -549,22 +550,24 @@ def generate_excel(system_id: int,
 
     total_b = total_p = total_pop_ws3 = 0
     for idx, c in enumerate(customers):
-        c_bills  = [
+        c_bills = [
             b for b in all_bills
             if b.customer_id == c.id
         ]
-        billed   = sum(b.amount or 0
-                       for b in c_bills)
-        paid     = sum(b.amount_paid or 0
-                       for b in c_bills)
-        owed     = billed - paid
-        rate     = round(
+        billed  = sum(
+            b.amount or 0 for b in c_bills
+        )
+        paid    = sum(
+            b.amount_paid or 0 for b in c_bills
+        )
+        owed    = billed - paid
+        rate    = round(
             (paid / billed) * 100, 1
         ) if billed > 0 else 0
-        conn     = getattr(
+        conn    = getattr(
             c, 'connection_type', 'PSP'
         ) or 'PSP'
-        pop      = getattr(c, 'population', 0) or 0
+        pop     = getattr(c, 'population', 0) or 0
 
         total_b       += billed
         total_p       += paid
@@ -687,6 +690,7 @@ def show():
         "Share with Water Office for DHIS2 submission."
     )
 
+    # Production
     st.markdown("#### 💧 Water Production")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -714,29 +718,48 @@ def show():
                   f"{'ALERT' if data['nrw_pct'] >= 20 else 'OK'}"
         )
 
+    # Service coverage
     st.markdown("#### 👥 Service Coverage")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         st.metric(
-            "Active connections",
-            data["total_customers"]
+            "PSP",
+            f"{data['psp_count']} connections"
         )
     with c2:
         st.metric(
-            "Population served",
-            f"{data['pop_estimate']:,}",
+            "Private",
+            f"{data['private_count']} connections"
         )
     with c3:
+        st.metric(
+            "Schools",
+            f"{data['school_count']} connections"
+        )
+    with c4:
+        st.metric(
+            "Institutions",
+            f"{data['institution_count']} connections"
+        )
+    with c5:
+        st.metric(
+            "Population served",
+            f"{data['pop_estimate']:,}"
+        )
+
+    c1, c2 = st.columns(2)
+    with c1:
         st.metric(
             "Per capita",
             f"{data['per_capita']} L/p/day"
         )
-    with c4:
+    with c2:
         st.metric(
             "Avg tank level",
             f"{data['avg_tank_pct']}%"
         )
 
+    # Financial
     st.markdown("#### 💰 Financial Performance")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -768,6 +791,7 @@ def show():
             else "Deficit"
         )
 
+    # Maintenance
     st.markdown("#### 🔧 Asset Management")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -796,76 +820,165 @@ def show():
     )
 
     dhis2_rows = [
-        {"Data Element": "Volume of water produced",
-         "Value": f"{data['total_pumped']:.1f}",
-         "Unit": "m³", "Status": "✓"},
-        {"Data Element": "Volume of water consumed",
-         "Value": f"{data['total_consumed']:.1f}",
-         "Unit": "m³", "Status": "✓"},
-        {"Data Element": "Non-revenue water volume",
-         "Value": f"{data['total_nrw_m3']:.1f}",
-         "Unit": "m³", "Status": "✓"},
-        {"Data Element": "Non-revenue water rate",
-         "Value": f"{data['nrw_pct']}",
-         "Unit": "%",
-         "Status": "🔴 ALERT"
-                   if data["nrw_pct"] >= 20
-                   else "🟢 OK"},
-        {"Data Element": "Active connections",
-         "Value": str(data["total_customers"]),
-         "Unit": "connections", "Status": "✓"},
-        {"Data Element": "PSP connections",
-         "Value": str(data["psp_count"]),
-         "Unit": "connections", "Status": "✓"},
-        {"Data Element": "Private connections",
-         "Value": str(data["private_count"]),
-         "Unit": "connections", "Status": "✓"},
-        {"Data Element": "School connections",
-         "Value": str(data["school_count"]),
-         "Unit": "connections", "Status": "✓"},
-        {"Data Element": "Population served",
-         "Value": f"{data['pop_estimate']:,}",
-         "Unit": "persons",
-         "Status": "✓ Actual figures"},
-        {"Data Element": "Per capita consumption",
-         "Value": f"{data['per_capita']}",
-         "Unit": "L/person/day", "Status": "✓"},
-        {"Data Element": f"Revenue billed ({currency})",
-         "Value": f"{data['total_billed']:,.0f}",
-         "Unit": currency, "Status": "✓"},
-        {"Data Element": f"Revenue collected ({currency})",
-         "Value": f"{data['total_collected']:,.0f}",
-         "Unit": currency, "Status": "✓"},
-        {"Data Element": "Collection efficiency",
-         "Value": f"{data['collection_rate']}",
-         "Unit": "%",
-         "Status": "🟢 Good"
-                   if data["collection_rate"] >= 80
-                   else "🔴 Below target"},
-        {"Data Element": f"Expenditure ({currency})",
-         "Value": f"{data['total_expenses']:,.0f}",
-         "Unit": currency, "Status": "✓"},
-        {"Data Element": f"Net surplus ({currency})",
-         "Value": f"{data['net_surplus']:,.0f}",
-         "Unit": currency,
-         "Status": "Surplus"
-                   if data["net_surplus"] >= 0
-                   else "Deficit"},
-        {"Data Element": "Maintenance incidents",
-         "Value": str(data["total_incidents"]),
-         "Unit": "incidents", "Status": "✓"},
-        {"Data Element": "Resolved incidents",
-         "Value": str(data["resolved_incidents"]),
-         "Unit": "incidents", "Status": "✓"},
-        {"Data Element": f"Maintenance cost ({currency})",
-         "Value": f"{data['total_maint_cost']:,.0f}",
-         "Unit": currency, "Status": "✓"},
-        {"Data Element": "Average tank level",
-         "Value": f"{data['avg_tank_pct']}",
-         "Unit": "%",
-         "Status": "✓"
-                   if data["avg_tank_pct"] > 20
-                   else "🔴 Low"},
+        {
+            "Data Element":
+                "Volume of water produced",
+            "Value":
+                f"{data['total_pumped']:.1f}",
+            "Unit": "m³",
+            "Status": "✓"
+        },
+        {
+            "Data Element":
+                "Volume of water consumed",
+            "Value":
+                f"{data['total_consumed']:.1f}",
+            "Unit": "m³",
+            "Status": "✓"
+        },
+        {
+            "Data Element":
+                "Non-revenue water volume",
+            "Value":
+                f"{data['total_nrw_m3']:.1f}",
+            "Unit": "m³",
+            "Status": "✓"
+        },
+        {
+            "Data Element":
+                "Non-revenue water rate",
+            "Value": f"{data['nrw_pct']}",
+            "Unit": "%",
+            "Status": "🔴 ALERT"
+                      if data["nrw_pct"] >= 20
+                      else "🟢 OK"
+        },
+        {
+            "Data Element": "Active connections",
+            "Value": str(data["total_customers"]),
+            "Unit": "connections",
+            "Status": "✓"
+        },
+        {
+            "Data Element": "PSP connections",
+            "Value": str(data["psp_count"]),
+            "Unit": "connections",
+            "Status": "✓"
+        },
+        {
+            "Data Element": "Private connections",
+            "Value": str(data["private_count"]),
+            "Unit": "connections",
+            "Status": "✓"
+        },
+        {
+            "Data Element": "School connections",
+            "Value": str(data["school_count"]),
+            "Unit": "connections",
+            "Status": "✓"
+        },
+        {
+            "Data Element":
+                "Institution connections",
+            "Value": str(
+                data["institution_count"]
+            ),
+            "Unit": "connections",
+            "Status": "✓"
+        },
+        {
+            "Data Element": "Population served",
+            "Value":
+                f"{data['pop_estimate']:,}",
+            "Unit": "persons",
+            "Status": "✓ Actual figures"
+        },
+        {
+            "Data Element":
+                "Per capita consumption",
+            "Value": f"{data['per_capita']}",
+            "Unit": "L/person/day",
+            "Status": "✓"
+        },
+        {
+            "Data Element":
+                f"Revenue billed ({currency})",
+            "Value":
+                f"{data['total_billed']:,.0f}",
+            "Unit": currency,
+            "Status": "✓"
+        },
+        {
+            "Data Element":
+                f"Revenue collected ({currency})",
+            "Value":
+                f"{data['total_collected']:,.0f}",
+            "Unit": currency,
+            "Status": "✓"
+        },
+        {
+            "Data Element":
+                "Collection efficiency",
+            "Value":
+                f"{data['collection_rate']}",
+            "Unit": "%",
+            "Status": "🟢 Good"
+                      if data["collection_rate"]
+                      >= 80
+                      else "🔴 Below target"
+        },
+        {
+            "Data Element":
+                f"Expenditure ({currency})",
+            "Value":
+                f"{data['total_expenses']:,.0f}",
+            "Unit": currency,
+            "Status": "✓"
+        },
+        {
+            "Data Element":
+                f"Net surplus ({currency})",
+            "Value":
+                f"{data['net_surplus']:,.0f}",
+            "Unit": currency,
+            "Status": "Surplus"
+                      if data["net_surplus"] >= 0
+                      else "Deficit"
+        },
+        {
+            "Data Element":
+                "Maintenance incidents",
+            "Value":
+                str(data["total_incidents"]),
+            "Unit": "incidents",
+            "Status": "✓"
+        },
+        {
+            "Data Element":
+                "Resolved incidents",
+            "Value": str(
+                data["resolved_incidents"]
+            ),
+            "Unit": "incidents",
+            "Status": "✓"
+        },
+        {
+            "Data Element":
+                f"Maintenance cost ({currency})",
+            "Value":
+                f"{data['total_maint_cost']:,.0f}",
+            "Unit": currency,
+            "Status": "✓"
+        },
+        {
+            "Data Element": "Average tank level",
+            "Value":
+                f"{data['avg_tank_pct']}",
+            "Unit": "%",
+            "Status": "✓"
+                      if data["avg_tank_pct"] > 20
+                      else "🔴 Low"
+        },
     ]
 
     st.dataframe(
@@ -897,13 +1010,15 @@ def show():
             f"_{year}.xlsx"
         )
         st.download_button(
-            label    = "⬇️ Download Excel report",
-            data     = excel_data,
-            file_name = fname,
-            mime     = "application/vnd.openxmlformats-"
-                       "officedocument.spreadsheetml.sheet",
+            label="⬇️ Download Excel report",
+            data=excel_data,
+            file_name=fname,
+            mime=(
+                "application/vnd.openxmlformats-"
+                "officedocument.spreadsheetml.sheet"
+            ),
             use_container_width=True,
-            type     = "primary"
+            type="primary"
         )
 
     with col2:
@@ -930,9 +1045,9 @@ def show():
             f"{period_label.replace(' ', '_')}.csv"
         )
         st.download_button(
-            label    = "⬇️ Download CSV",
-            data     = csv_data,
-            file_name = fname_csv,
-            mime     = "text/csv",
+            label="⬇️ Download CSV",
+            data=csv_data,
+            file_name=fname_csv,
+            mime="text/csv",
             use_container_width=True
         )
