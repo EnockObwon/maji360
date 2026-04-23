@@ -312,6 +312,9 @@ else:
     elif page == "CustomerBilling":
         from pages.customer_billing import show
         show()
+    elif page == "Maintenance":
+        from pages.maintenance import show
+        show()
     elif page == "SystemSetup":
         from pages.system_setup import show
         show()
