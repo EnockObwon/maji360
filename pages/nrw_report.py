@@ -8,14 +8,6 @@ from sqlalchemy import text as sql_text
 
 
 def get_monthly_storage_changes(system_id: int) -> dict:
-    """
-    Calculate storage change per month using
-    tank level readings within each month.
-    Only returns months where at least 2 readings
-    exist within the same month.
-    Storage change = last reading - first reading
-    of that month.
-    """
     session = get_session()
     try:
         levels = session.execute(sql_text(
@@ -32,15 +24,12 @@ def get_monthly_storage_changes(system_id: int) -> dict:
     if not levels:
         return {}
 
-    # Group readings by month
     monthly_readings = defaultdict(list)
     for l in levels:
         date_str = str(l[0])[:10]
         month    = date_str[:7]
         monthly_readings[month].append(float(l[1]))
 
-    # Calculate storage change only for months
-    # with at least 2 readings
     storage_changes = {}
     for month, vols in monthly_readings.items():
         if len(vols) >= 2:
@@ -48,6 +37,33 @@ def get_monthly_storage_changes(system_id: int) -> dict:
             storage_changes[month] = change
 
     return storage_changes
+
+
+def get_maintenance_events(system_id: int) -> dict:
+    session = get_session()
+    try:
+        rows = session.execute(sql_text(
+            "SELECT incident_date, category "
+            "FROM maintenance "
+            "WHERE system_id = :sid "
+            "ORDER BY incident_date"
+        ), {"sid": system_id}).fetchall()
+        result = [
+            {"incident_date": str(r[0])[:7],
+             "category":      r[1]}
+            for r in rows
+        ]
+    except Exception:
+        result = []
+    session.close()
+
+    events_by_month = defaultdict(list)
+    for r in result:
+        events_by_month[
+            r["incident_date"]
+        ].append(r["category"])
+
+    return dict(events_by_month)
 
 
 def show():
@@ -99,7 +115,6 @@ def show():
             monthly[month]["consumed"] += \
                 r.water_consumed_m3
 
-    # Only include months with pump data
     months = sorted(
         m for m in monthly.keys()
         if monthly[m]["pumped"] > 0
@@ -127,38 +142,16 @@ def show():
         for n, p in zip(nrw_m3, pumped)
     ]
 
-    # ── Get monthly storage changes ────────────────────
-    storage_changes = get_monthly_storage_changes(
+    # ── Storage changes and maintenance ───────────────
+    storage_changes     = get_monthly_storage_changes(
         system_id
     )
-    has_adjusted = len(storage_changes) > 0
-def get_maintenance_events(system_id: int) -> dict:
-    """
-    Fetch maintenance events grouped by month.
-    Returns dict of month -> list of events
-    for annotation on NRW chart.
-    """
-    session = get_session()
-    try:
-        rows = session.execute(sql_text(
-            "SELECT incident_date, category, "
-            "status FROM maintenance "
-            "WHERE system_id = :sid "
-            "ORDER BY incident_date"
-        ), {"sid": system_id}).fetchall()
-        result = [dict(r._mapping) for r in rows]
-    except Exception:
-        result = []
-    session.close()
+    maintenance_events  = get_maintenance_events(
+        system_id
+    )
+    has_adjusted        = len(storage_changes) > 0
 
-    events_by_month = defaultdict(list)
-    for r in result:
-        month = str(r["incident_date"])[:7]
-        events_by_month[month].append(
-            r["category"]
-        )
-    return dict(events_by_month)
-    # ── Calculate adjusted NRW per month ───────────────
+    # ── Adjusted NRW ───────────────────────────────────
     adj_nrw_pct = []
     adj_nrw_m3  = []
 
@@ -211,10 +204,7 @@ def get_maintenance_events(system_id: int) -> dict:
             f"{total_consumed:.0f} m³"
         )
     with c3:
-        st.metric(
-            "Overall NRW",
-            f"{overall_nrw}%"
-        )
+        st.metric("Overall NRW", f"{overall_nrw}%")
     with c4:
         if latest_adj is not None:
             st.metric(
@@ -223,25 +213,17 @@ def get_maintenance_events(system_id: int) -> dict:
                 delta=f"{round(latest_adj - latest_nrw, 1)}% vs operational"
             )
         else:
-            st.metric(
-                "Latest NRW",
-                f"{latest_nrw}%"
-            )
+            st.metric("Latest NRW", f"{latest_nrw}%")
 
-    # ── Status banner ──────────────────────────────────
     if has_adjusted:
         st.success(
             "✓ Adjusted NRW available for months "
-            "with daily tank level readings. "
-            "Continue recording daily dips in "
-            "Field Ops for ongoing adjusted figures."
+            "with daily tank level readings."
         )
     else:
         st.info(
-            "ℹ️ Adjusted NRW not yet available. "
-            "Record at least 2 tank level dip readings "
-            "within the same month in Field Ops to "
-            "enable adjusted NRW for that month."
+            "ℹ️ Record 2+ tank level dips per month "
+            "in Field Ops to enable adjusted NRW."
         )
 
     st.divider()
@@ -251,8 +233,7 @@ def get_maintenance_events(system_id: int) -> dict:
     st.caption(
         "Blue = pumped · Green = to consumers · "
         "Red line = operational NRW % · "
-        "Orange dotted = adjusted NRW % "
-        "(months with 2+ tank level readings)"
+        "Orange dotted = adjusted NRW %"
     )
 
     fig1 = go.Figure()
@@ -347,12 +328,12 @@ def get_maintenance_events(system_id: int) -> dict:
 
     st.divider()
 
-    # ── Chart 2: NRW trend ─────────────────────────────
+    # ── Chart 2: NRW trend with maintenance ───────────
     st.markdown("### NRW trend over time")
     st.caption(
         "Red = operational NRW · "
-        "Orange dotted = adjusted NRW "
-        "(months with 2+ tank level readings)"
+        "Orange dotted = adjusted NRW · "
+        "Purple markers = maintenance events"
     )
 
     fig2 = go.Figure()
@@ -383,6 +364,40 @@ def get_maintenance_events(system_id: int) -> dict:
             fillcolor = "rgba(249,115,22,0.05)"
         ))
 
+    # Add maintenance event markers as scatter points
+    if maintenance_events:
+        maint_x = []
+        maint_y = []
+        maint_text = []
+        for month in months:
+            if month in maintenance_events:
+                idx    = months.index(month)
+                events = maintenance_events[month]
+                maint_x.append(month)
+                maint_y.append(nrw_pct[idx])
+                maint_text.append(
+                    f"🔧 {len(events)} maintenance: "
+                    + ", ".join(events[:2])
+                )
+
+        if maint_x:
+            fig2.add_trace(go.Scatter(
+                name         = "Maintenance event",
+                x            = maint_x,
+                y            = maint_y,
+                mode         = "markers",
+                marker       = dict(
+                    symbol = "diamond",
+                    size   = 14,
+                    color  = "#8b5cf6",
+                    line   = dict(
+                        color="white", width=2
+                    )
+                ),
+                text         = maint_text,
+                hovertemplate = "%{text}<extra></extra>"
+            ))
+
     fig2.add_hline(
         y                   = 20,
         line_dash           = "dash",
@@ -391,26 +406,8 @@ def get_maintenance_events(system_id: int) -> dict:
         annotation_text     = "20% threshold",
         annotation_position = "top right"
     )
-    # Add maintenance event markers on NRW chart
-    maintenance_events = get_maintenance_events(
-        system_id
-    )
-    for month in months:
-        if month in maintenance_events:
-            events  = maintenance_events[month]
-            label   = f"🔧 {len(events)} maintenance"
-            m_index = months.index(month)
-            fig2.add_vline(
-                x             = month,
-                line_dash     = "dot",
-                line_color    = "#8b5cf6",
-                opacity       = 0.6,
-                annotation_text = label,
-                annotation_position = "top left",
-                annotation_font_size = 10
-            )
     fig2.update_layout(
-        height        = 300,
+        height        = 320,
         margin        = dict(t=20, b=10, l=0, r=0),
         plot_bgcolor  = "white",
         paper_bgcolor = "white",
@@ -439,9 +436,10 @@ def get_maintenance_events(system_id: int) -> dict:
 
     rows = []
     for i, month in enumerate(months):
-        storage = storage_changes.get(month)
-        adj_pct = adj_nrw_pct[i]
-        status  = (
+        storage  = storage_changes.get(month)
+        adj_pct  = adj_nrw_pct[i]
+        m_events = maintenance_events.get(month, [])
+        status   = (
             "🔴 ALERT" if nrw_pct[i] >= 20 else
             "🟡 WARN"  if nrw_pct[i] >= 15 else
             "🟢 OK"
@@ -458,6 +456,8 @@ def get_maintenance_events(system_id: int) -> dict:
             "Adj NRW %":    f"{adj_pct}%"
                             if adj_pct is not None
                             else "—",
+            "Maintenance":  f"🔧 {len(m_events)}"
+                            if m_events else "—",
             "Status":       status
         })
 
@@ -471,11 +471,10 @@ def get_maintenance_events(system_id: int) -> dict:
     <div style='font-size:12px;color:#94a3b8;
     margin-top:8px'>
     ℹ️ Storage Δ = change in tank volume within
-    that month (last reading minus first reading).
-    Requires at least 2 tank level readings in
-    the same month. Positive = tank filled
-    (reduces real NRW). Negative = tank drained
-    (increases real NRW).
+    that month. Requires 2+ tank level readings
+    per month. 🔧 = maintenance events recorded
+    that month — hover on purple diamonds in chart
+    for details.
     </div>
     """, unsafe_allow_html=True)
 
