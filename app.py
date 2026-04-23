@@ -407,6 +407,9 @@ else:
     elif page == "SystemSetup":
         from pages.system_setup import show
         show()
+    elif page == "Reports":
+        from pages.reports import show
+        show()
     elif page == "Admin":
         from pages.admin import show
         show()
