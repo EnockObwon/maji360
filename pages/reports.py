@@ -719,34 +719,25 @@ def show():
         )
 
     # Service coverage
+    # Service coverage
     st.markdown("#### 👥 Service Coverage")
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.metric(
-            "PSP",
-            f"{data['psp_count']} connections"
-        )
+        st.metric("PSP", data['psp_count'])
     with c2:
-        st.metric(
-            "Private",
-            f"{data['private_count']} connections"
-        )
+        st.metric("Private", data['private_count'])
     with c3:
-        st.metric(
-            "Schools",
-            f"{data['school_count']} connections"
-        )
+        st.metric("Schools", data['school_count'])
     with c4:
         st.metric(
             "Institutions",
-            f"{data['institution_count']} connections"
+            data['institution_count']
         )
     with c5:
         st.metric(
-            "Population served",
+            "Population",
             f"{data['pop_estimate']:,}"
         )
-
     c1, c2 = st.columns(2)
     with c1:
         st.metric(
