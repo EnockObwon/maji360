@@ -50,6 +50,67 @@ st.markdown("""
         font-size: 12px;
     }
 
+    /* ── Mobile bottom navigation ── */
+    .mobile-nav {
+        display: none;
+    }
+
+    @media (max-width: 768px) {
+        /* Show mobile nav on small screens */
+        .mobile-nav {
+            display: flex;
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 9999;
+            background: #0a1628;
+            border-top: 1px solid #1e3a5f;
+            padding: 6px 0 10px 0;
+            justify-content: space-around;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .mobile-nav a {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            color: #94a3b8 !important;
+            text-decoration: none !important;
+            font-size: 9px;
+            padding: 4px 6px;
+            border-radius: 8px;
+            min-width: 52px;
+            text-align: center;
+            transition: all 0.2s;
+        }
+
+        .mobile-nav a:hover,
+        .mobile-nav a.active {
+            color: #0ea5e9 !important;
+            background: rgba(14,165,233,0.15);
+        }
+
+        .mobile-nav a span.nav-icon {
+            font-size: 20px;
+            margin-bottom: 2px;
+            display: block;
+        }
+
+        /* Add padding to main content
+           so it is not hidden behind nav bar */
+        .main .block-container {
+            padding-bottom: 100px !important;
+        }
+
+        /* Hide sidebar toggle on mobile
+           since we have bottom nav */
+        [data-testid="collapsedControl"] {
+            display: none !important;
+        }
+    }
+
     /* Alert banners */
     .alert-banner {
         background: #fef2f2;
@@ -78,8 +139,6 @@ st.markdown("""
         color: #166534;
         font-size: 14px;
     }
-
-    /* PWA meta tags */
 </style>
 <link rel="manifest" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/manifest.json">
 <meta name="theme-color" content="#0ea5e9">
@@ -89,6 +148,71 @@ st.markdown("""
 <meta name="apple-mobile-web-app-title" content="Maji360">
 <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/static/icon-192.png">
 """, unsafe_allow_html=True)
+
+
+def inject_mobile_nav(current_page: str,
+                       user: dict):
+    """
+    Inject a fixed bottom navigation bar
+    for mobile screens. Visible only on
+    screens narrower than 768px via CSS.
+    Uses JavaScript postMessage to change
+    page state.
+    """
+    role = user.get("role", "viewer")
+
+    # Core pages always shown
+    nav_items = [
+        ("🏠", "Home",     "Home"),
+        ("📉", "NRW",      "NRW"),
+        ("💰", "Billing",  "Billing"),
+        ("📋", "Field",    "FieldOps"),
+        ("📄", "Reports",  "Reports"),
+        ("🔧", "Maint",    "Maintenance"),
+        ("📊", "Finance",  "Financial"),
+        ("⚙️", "Ops",      "Operations"),
+        ("💵", "Cust Bill","CustomerBilling"),
+        ("🗺️", "Map",      "Map"),
+        ("🔄", "Sync",     "Sync"),
+    ]
+
+    if role in ["super_admin", "system_admin"]:
+        nav_items.append(
+            ("🔩", "Setup", "SystemSetup")
+        )
+    if role == "super_admin":
+        nav_items.append(
+            ("👑", "Admin", "Admin")
+        )
+
+    # Build nav links using Streamlit query params
+    nav_html = '<div class="mobile-nav">'
+    for icon, label, page_key in nav_items:
+        active_class = "active" \
+            if current_page == page_key else ""
+        nav_html += f"""
+        <a href="?nav={page_key}"
+           class="{active_class}"
+           onclick="
+             window.parent.postMessage(
+               {{type:'streamlit:setComponentValue',
+                value:'{page_key}'}}, '*');
+           ">
+            <span class="nav-icon">{icon}</span>
+            {label}
+        </a>"""
+
+    nav_html += "</div>"
+    st.markdown(nav_html, unsafe_allow_html=True)
+
+    # Handle query param navigation
+    params = st.query_params
+    if "nav" in params:
+        nav_val = params["nav"]
+        if nav_val != current_page:
+            st.session_state["page"] = nav_val
+            st.query_params.clear()
+            st.rerun()
 
 
 def show_login():
@@ -120,8 +244,12 @@ def show_login():
 
         with tab_login:
             with st.form("login_form"):
-                st.markdown("#### Sign in to your account")
-                email    = st.text_input("Email address")
+                st.markdown(
+                    "#### Sign in to your account"
+                )
+                email    = st.text_input(
+                    "Email address"
+                )
                 password = st.text_input(
                     "Password", type="password"
                 )
@@ -133,8 +261,8 @@ def show_login():
                 if submit:
                     if not email or not password:
                         st.error(
-                            "Please enter your email "
-                            "and password."
+                            "Please enter your "
+                            "email and password."
                         )
                     else:
                         result = login(
@@ -142,29 +270,34 @@ def show_login():
                         )
                         if result == "pending":
                             st.warning(
-                                "Your account is pending "
-                                "approval by the "
-                                "administrator."
+                                "Your account is "
+                                "pending approval by "
+                                "the administrator."
                             )
                         elif result:
-                            st.session_state["user"] = \
-                                result
-                            st.session_state["page"] = \
-                                "Home"
+                            st.session_state[
+                                "user"
+                            ] = result
+                            st.session_state[
+                                "page"
+                            ] = "Home"
                             st.rerun()
                         else:
                             st.error(
-                                "Invalid email or password."
+                                "Invalid email "
+                                "or password."
                             )
 
         with tab_register:
-            st.markdown("#### Request viewer access")
+            st.markdown(
+                "#### Request viewer access"
+            )
             st.markdown(
                 "<span style='font-size:13px;"
-                "color:#64748b'>Fill in your details. "
-                "Your account will be reviewed and "
-                "activated by the administrator."
-                "</span>",
+                "color:#64748b'>Fill in your "
+                "details. Your account will be "
+                "reviewed and activated by the "
+                "administrator.</span>",
                 unsafe_allow_html=True
             )
 
@@ -200,9 +333,10 @@ def show_login():
                 )
                 reg_reason = st.text_area(
                     "Why do you need access?",
-                    placeholder="e.g. Water Board "
-                                "member, donor, "
-                                "government monitor...",
+                    placeholder=(
+                        "e.g. Water Board member, "
+                        "donor, government monitor..."
+                    ),
                     height=80
                 )
 
@@ -242,15 +376,19 @@ def show_login():
                             ]
                         )
                         if result["success"]:
-                            st.success(result["message"])
+                            st.success(
+                                result["message"]
+                            )
                         else:
-                            st.error(result["message"])
+                            st.error(
+                                result["message"]
+                            )
 
         st.markdown(
             "<div style='text-align:center;"
             "margin-top:2rem;font-size:12px;"
             "color:#94a3b8'>"
-            "Maji360 v1.4.0 · Sub-Saharan Africa"
+            "Maji360 v1.5.0 · Sub-Saharan Africa"
             "</div>",
             unsafe_allow_html=True
         )
@@ -278,7 +416,7 @@ def show_sidebar():
         )
         st.divider()
 
-        # ── System selector ────────────────────────────
+        # ── System selector ────────────────────────
         systems = get_accessible_systems()
 
         if not systems:
@@ -321,7 +459,7 @@ def show_sidebar():
 
         st.divider()
 
-        # ── Navigation ─────────────────────────────────
+        # ── Navigation ─────────────────────────────
         pages = {
             "🏠  Home":             "Home",
             "📉  NRW Report":       "NRW",
@@ -372,7 +510,13 @@ def show_sidebar():
 if "user" not in st.session_state:
     show_login()
 else:
+    user = st.session_state.get("user", {})
     page = show_sidebar()
+
+    # Inject mobile bottom navigation
+    inject_mobile_nav(
+        page or "Home", user
+    )
 
     if page == "Home" or page is None:
         from pages.home import show
@@ -385,6 +529,9 @@ else:
         show()
     elif page == "Financial":
         from pages.financial import show
+        show()
+    elif page == "Reports":
+        from pages.reports import show
         show()
     elif page == "Operations":
         from pages.operations import show
@@ -406,9 +553,6 @@ else:
         show()
     elif page == "SystemSetup":
         from pages.system_setup import show
-        show()
-    elif page == "Reports":
-        from pages.reports import show
         show()
     elif page == "Admin":
         from pages.admin import show
