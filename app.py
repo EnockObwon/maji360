@@ -24,8 +24,8 @@ st.markdown("""
 
     /* Sidebar styling — desktop and mobile */
     [data-testid="stSidebar"] {
-        background: #0a1628;
-        min-width: 240px;
+        background: #0a1628 !important;
+        min-width: 240px !important;
     }
     [data-testid="stSidebar"] * {
         color: #e2e8f0 !important;
@@ -45,50 +45,47 @@ st.markdown("""
         background: rgba(14,165,233,0.15) !important;
         color: #0ea5e9 !important;
     }
-    [data-testid="stSidebar"] .stSelectbox label {
-        color: #94a3b8 !important;
-        font-size: 12px;
-    }
 
-    /* Keep sidebar toggle always visible
-       and easy to tap on mobile */
+    /* Hamburger button — large and always visible */
     [data-testid="collapsedControl"] {
         display: flex !important;
-        top: 8px !important;
-        left: 8px !important;
-        width: 44px !important;
-        height: 44px !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        position: fixed !important;
+        top: 10px !important;
+        left: 10px !important;
+        width: 48px !important;
+        height: 48px !important;
         background: #0a1628 !important;
-        border-radius: 8px !important;
+        border-radius: 10px !important;
         align-items: center !important;
         justify-content: center !important;
-        z-index: 999 !important;
+        z-index: 99999 !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important;
+        cursor: pointer !important;
     }
-
     [data-testid="collapsedControl"] svg {
         fill: #0ea5e9 !important;
-        width: 24px !important;
-        height: 24px !important;
+        width: 26px !important;
+        height: 26px !important;
     }
 
-    /* Mobile sidebar full width */
+    /* Mobile specific */
     @media (max-width: 768px) {
         [data-testid="stSidebar"] {
             width: 85vw !important;
             min-width: 260px !important;
         }
-
         [data-testid="stSidebar"] .stButton button {
             font-size: 16px !important;
             padding: 12px 16px !important;
             margin: 3px 0 !important;
             min-height: 48px !important;
         }
-
-        /* Push content down so hamburger
-           is not over the page title */
         .main .block-container {
-            padding-top: 3rem !important;
+            padding-top: 4rem !important;
+            padding-left: 1rem !important;
+            padding-right: 1rem !important;
         }
     }
 
@@ -121,6 +118,40 @@ st.markdown("""
         font-size: 14px;
     }
 </style>
+
+<script>
+    // Force sidebar to stay visible on mobile
+    // by periodically checking and expanding it
+    function forceSidebar() {
+        try {
+            const sidebar = window.parent.document
+                .querySelector(
+                    '[data-testid="stSidebar"]'
+                );
+            const collapsed = window.parent.document
+                .querySelector(
+                    '[data-testid="collapsedControl"]'
+                );
+            if (sidebar) {
+                sidebar.style.display = 'flex';
+                sidebar.style.visibility = 'visible';
+                sidebar.style.opacity = '1';
+                sidebar.style.transform = 'none';
+                sidebar.style.width = '260px';
+                sidebar.style.minWidth = '240px';
+            }
+            if (collapsed) {
+                collapsed.style.display = 'flex';
+                collapsed.style.visibility = 'visible';
+                collapsed.style.opacity = '1';
+            }
+        } catch(e) {}
+    }
+    // Run immediately and every 500ms
+    forceSidebar();
+    setInterval(forceSidebar, 500);
+</script>
+
 <link rel="manifest" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/manifest.json">
 <meta name="theme-color" content="#0ea5e9">
 <meta name="mobile-web-app-capable" content="yes">
