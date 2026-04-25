@@ -1,2 +1,2 @@
 # maji360
-Rural Water Management App
+Rural Water Management System
