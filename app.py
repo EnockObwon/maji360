@@ -17,15 +17,13 @@ st.set_page_config(
 # ── Global CSS ─────────────────────────────────────────
 st.markdown("""
 <style>
-    /* Hide streamlit default elements */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
 
-    /* Sidebar styling — desktop and mobile */
     [data-testid="stSidebar"] {
-        background: #0a1628 !important;
-        min-width: 240px !important;
+        background: #0a1628;
+        min-width: 240px;
     }
     [data-testid="stSidebar"] * {
         color: #e2e8f0 !important;
@@ -36,60 +34,50 @@ st.markdown("""
         color: #94a3b8 !important;
         text-align: left;
         padding: 8px 12px;
-        font-size: 15px;
+        font-size: 14px;
         width: 100%;
         border-radius: 6px;
-        margin: 2px 0;
+        margin: 1px 0;
     }
     [data-testid="stSidebar"] .stButton button:hover {
         background: rgba(14,165,233,0.15) !important;
         color: #0ea5e9 !important;
     }
-
-    /* Hamburger button — large and always visible */
-    [data-testid="collapsedControl"] {
-        display: flex !important;
-        visibility: visible !important;
-        opacity: 1 !important;
-        position: fixed !important;
-        top: 10px !important;
-        left: 10px !important;
-        width: 48px !important;
-        height: 48px !important;
-        background: #0a1628 !important;
-        border-radius: 10px !important;
-        align-items: center !important;
-        justify-content: center !important;
-        z-index: 99999 !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important;
-        cursor: pointer !important;
-    }
-    [data-testid="collapsedControl"] svg {
-        fill: #0ea5e9 !important;
-        width: 26px !important;
-        height: 26px !important;
+    [data-testid="stSidebar"] .stSelectbox label {
+        color: #94a3b8 !important;
+        font-size: 12px;
     }
 
-    /* Mobile specific */
+    /* Mobile top nav bar */
+    .mobile-topnav {
+        display: none;
+    }
     @media (max-width: 768px) {
-        [data-testid="stSidebar"] {
-            width: 85vw !important;
-            min-width: 260px !important;
+        .mobile-topnav {
+            display: block;
+            background: #0a1628;
+            padding: 10px 12px;
+            border-radius: 10px;
+            margin-bottom: 16px;
         }
-        [data-testid="stSidebar"] .stButton button {
-            font-size: 16px !important;
-            padding: 12px 16px !important;
-            margin: 3px 0 !important;
-            min-height: 48px !important;
+        .mobile-topnav .nav-title {
+            color: #0ea5e9;
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        .mobile-topnav .nav-user {
+            color: #94a3b8;
+            font-size: 12px;
+            margin-bottom: 8px;
         }
         .main .block-container {
-            padding-top: 4rem !important;
-            padding-left: 1rem !important;
-            padding-right: 1rem !important;
+            padding-top: 1rem !important;
+            padding-left: 0.5rem !important;
+            padding-right: 0.5rem !important;
         }
     }
 
-    /* Alert banners */
     .alert-banner {
         background: #fef2f2;
         border-left: 4px solid #ef4444;
@@ -118,40 +106,6 @@ st.markdown("""
         font-size: 14px;
     }
 </style>
-
-<script>
-    // Force sidebar to stay visible on mobile
-    // by periodically checking and expanding it
-    function forceSidebar() {
-        try {
-            const sidebar = window.parent.document
-                .querySelector(
-                    '[data-testid="stSidebar"]'
-                );
-            const collapsed = window.parent.document
-                .querySelector(
-                    '[data-testid="collapsedControl"]'
-                );
-            if (sidebar) {
-                sidebar.style.display = 'flex';
-                sidebar.style.visibility = 'visible';
-                sidebar.style.opacity = '1';
-                sidebar.style.transform = 'none';
-                sidebar.style.width = '260px';
-                sidebar.style.minWidth = '240px';
-            }
-            if (collapsed) {
-                collapsed.style.display = 'flex';
-                collapsed.style.visibility = 'visible';
-                collapsed.style.opacity = '1';
-            }
-        } catch(e) {}
-    }
-    // Run immediately and every 500ms
-    forceSidebar();
-    setInterval(forceSidebar, 500);
-</script>
-
 <link rel="manifest" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/manifest.json">
 <meta name="theme-color" content="#0ea5e9">
 <meta name="mobile-web-app-capable" content="yes">
@@ -218,8 +172,7 @@ def show_login():
                         if result == "pending":
                             st.warning(
                                 "Your account is "
-                                "pending approval by "
-                                "the administrator."
+                                "pending approval."
                             )
                         elif result:
                             st.session_state[
@@ -239,15 +192,6 @@ def show_login():
             st.markdown(
                 "#### Request viewer access"
             )
-            st.markdown(
-                "<span style='font-size:13px;"
-                "color:#64748b'>Fill in your "
-                "details. Your account will be "
-                "reviewed and activated by the "
-                "administrator.</span>",
-                unsafe_allow_html=True
-            )
-
             with st.form("register_form"):
                 reg_name  = st.text_input(
                     "Full name *"
@@ -275,7 +219,7 @@ def show_login():
                 session.close()
 
                 reg_system = st.selectbox(
-                    "Water system of interest *",
+                    "Water system *",
                     options=list(sys_opts.keys())
                 )
                 reg_reason = st.text_area(
@@ -341,6 +285,113 @@ def show_login():
         )
 
 
+def show_mobile_nav(current_page: str,
+                     user: dict,
+                     systems: list):
+    """
+    Mobile navigation rendered inside main
+    content area — always visible regardless
+    of sidebar state.
+    """
+    role = user.get("role", "viewer")
+
+    pages = {
+        "🏠 Home":              "Home",
+        "📉 NRW Report":        "NRW",
+        "💰 Billing":           "Billing",
+        "📊 Financial":         "Financial",
+        "📄 Reports":           "Reports",
+        "⚙️ Operations":        "Operations",
+        "📋 Field Ops":         "FieldOps",
+        "💵 Customer Billing":  "CustomerBilling",
+        "🔧 Maintenance":       "Maintenance",
+        "🗺️ Map":               "Map",
+        "🔄 Sync":              "Sync",
+    }
+    if role in ["super_admin", "system_admin"]:
+        pages["🔩 System Setup"] = "SystemSetup"
+    if role == "super_admin":
+        pages["👑 Admin"] = "Admin"
+
+    st.markdown(
+        f"<div class='mobile-topnav'>"
+        f"<div class='nav-title'>💧 Maji360</div>"
+        f"<div class='nav-user'>"
+        f"{user.get('name','')} · "
+        f"{role.replace('_',' ').title()}"
+        f"</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
+    # System selector on mobile
+    if len(systems) > 1:
+        sys_names = [s["name"] for s in systems]
+        current   = st.session_state.get(
+            "selected_system_name", sys_names[0]
+        )
+        idx = sys_names.index(current) \
+              if current in sys_names else 0
+        chosen = st.selectbox(
+            "System",
+            options=sys_names,
+            index=idx,
+            key="mobile_sys_select"
+        )
+        selected = next(
+            s for s in systems
+            if s["name"] == chosen
+        )
+        st.session_state[
+            "selected_system_id"
+        ]   = selected["id"]
+        st.session_state[
+            "selected_system_name"
+        ] = selected["name"]
+        st.session_state[
+            "currency"
+        ] = selected.get("currency", "UGX")
+
+    # Page selector as dropdown
+    page_labels  = list(pages.keys())
+    page_keys    = list(pages.values())
+    current_idx  = page_keys.index(current_page) \
+                   if current_page in page_keys \
+                   else 0
+
+    selected_label = st.selectbox(
+        "Navigate to",
+        options=page_labels,
+        index=current_idx,
+        key="mobile_page_select"
+    )
+    selected_page = pages[selected_label]
+
+    if selected_page != current_page:
+        st.session_state["page"] = selected_page
+        st.rerun()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(
+            f"<div style='font-size:12px;"
+            f"color:#64748b;padding:4px 0'>"
+            f"📍 {st.session_state.get('selected_system_name','')}"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+    with col2:
+        if st.button(
+            "Sign out",
+            key="mobile_signout",
+            use_container_width=True
+        ):
+            st.session_state.clear()
+            st.rerun()
+
+    st.divider()
+
+
 def show_sidebar():
     user = st.session_state.get("user", {})
     if not user:
@@ -363,12 +414,11 @@ def show_sidebar():
         )
         st.divider()
 
-        # ── System selector ────────────────────────
         systems = get_accessible_systems()
 
         if not systems:
             st.warning("No systems assigned.")
-            return None
+            return None, []
 
         if len(systems) == 1:
             selected = systems[0]
@@ -406,7 +456,6 @@ def show_sidebar():
 
         st.divider()
 
-        # ── Navigation ─────────────────────────────
         pages = {
             "🏠  Home":             "Home",
             "📉  NRW Report":       "NRW",
@@ -450,16 +499,29 @@ def show_sidebar():
             st.session_state.clear()
             st.rerun()
 
-        return current_page
+        return current_page, systems
 
 
 # ── Main app ───────────────────────────────────────────
 if "user" not in st.session_state:
     show_login()
 else:
-    page = show_sidebar()
+    user           = st.session_state.get("user", {})
+    sidebar_result = show_sidebar()
 
-    if page == "Home" or page is None:
+    if sidebar_result is None:
+        st.stop()
+
+    page, systems = sidebar_result
+
+    if not page:
+        page = "Home"
+
+    # Mobile navigation — always rendered in
+    # main content, visible when sidebar is hidden
+    show_mobile_nav(page, user, systems)
+
+    if page == "Home":
         from pages.home import show
         show()
     elif page == "NRW":
