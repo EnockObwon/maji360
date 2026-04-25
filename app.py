@@ -8,9 +8,9 @@ from core.auth import (
 
 # ── Page config ────────────────────────────────────────
 st.set_page_config(
-    page_title = "Maji360",
-    page_icon  = "💧",
-    layout     = "wide",
+    page_title            = "Maji360",
+    page_icon             = "💧",
+    layout                = "wide",
     initial_sidebar_state = "expanded"
 )
 
@@ -22,7 +22,7 @@ st.markdown("""
     footer {visibility: hidden;}
     header {visibility: hidden;}
 
-    /* Sidebar styling */
+    /* Sidebar styling — desktop and mobile */
     [data-testid="stSidebar"] {
         background: #0a1628;
         min-width: 240px;
@@ -35,11 +35,11 @@ st.markdown("""
         border: none;
         color: #94a3b8 !important;
         text-align: left;
-        padding: 6px 12px;
-        font-size: 14px;
+        padding: 8px 12px;
+        font-size: 15px;
         width: 100%;
         border-radius: 6px;
-        margin: 1px 0;
+        margin: 2px 0;
     }
     [data-testid="stSidebar"] .stButton button:hover {
         background: rgba(14,165,233,0.15) !important;
@@ -50,64 +50,45 @@ st.markdown("""
         font-size: 12px;
     }
 
-    /* ── Mobile bottom navigation ── */
-    .mobile-nav {
-        display: none;
+    /* Keep sidebar toggle always visible
+       and easy to tap on mobile */
+    [data-testid="collapsedControl"] {
+        display: flex !important;
+        top: 8px !important;
+        left: 8px !important;
+        width: 44px !important;
+        height: 44px !important;
+        background: #0a1628 !important;
+        border-radius: 8px !important;
+        align-items: center !important;
+        justify-content: center !important;
+        z-index: 999 !important;
     }
 
+    [data-testid="collapsedControl"] svg {
+        fill: #0ea5e9 !important;
+        width: 24px !important;
+        height: 24px !important;
+    }
+
+    /* Mobile sidebar full width */
     @media (max-width: 768px) {
-        /* Show mobile nav on small screens */
-        .mobile-nav {
-            display: flex;
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            z-index: 9999;
-            background: #0a1628;
-            border-top: 1px solid #1e3a5f;
-            padding: 6px 0 10px 0;
-            justify-content: space-around;
-            align-items: center;
-            flex-wrap: wrap;
+        [data-testid="stSidebar"] {
+            width: 85vw !important;
+            min-width: 260px !important;
         }
 
-        .mobile-nav a {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            color: #94a3b8 !important;
-            text-decoration: none !important;
-            font-size: 9px;
-            padding: 4px 6px;
-            border-radius: 8px;
-            min-width: 52px;
-            text-align: center;
-            transition: all 0.2s;
+        [data-testid="stSidebar"] .stButton button {
+            font-size: 16px !important;
+            padding: 12px 16px !important;
+            margin: 3px 0 !important;
+            min-height: 48px !important;
         }
 
-        .mobile-nav a:hover,
-        .mobile-nav a.active {
-            color: #0ea5e9 !important;
-            background: rgba(14,165,233,0.15);
-        }
-
-        .mobile-nav a span.nav-icon {
-            font-size: 20px;
-            margin-bottom: 2px;
-            display: block;
-        }
-
-        /* Add padding to main content
-           so it is not hidden behind nav bar */
+        /* Push content down so hamburger
+           is not over the page title */
         .main .block-container {
-            padding-bottom: 100px !important;
-        }
-
-        /* Hide sidebar toggle on mobile
-           since we have bottom nav */
-        [data-testid="collapsedControl"] {
-            display: none !important;
+            padding-top: 3rem !important;
         }
     }
 
@@ -148,71 +129,6 @@ st.markdown("""
 <meta name="apple-mobile-web-app-title" content="Maji360">
 <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/static/icon-192.png">
 """, unsafe_allow_html=True)
-
-
-def inject_mobile_nav(current_page: str,
-                       user: dict):
-    """
-    Inject a fixed bottom navigation bar
-    for mobile screens. Visible only on
-    screens narrower than 768px via CSS.
-    Uses JavaScript postMessage to change
-    page state.
-    """
-    role = user.get("role", "viewer")
-
-    # Core pages always shown
-    nav_items = [
-        ("🏠", "Home",     "Home"),
-        ("📉", "NRW",      "NRW"),
-        ("💰", "Billing",  "Billing"),
-        ("📋", "Field",    "FieldOps"),
-        ("📄", "Reports",  "Reports"),
-        ("🔧", "Maint",    "Maintenance"),
-        ("📊", "Finance",  "Financial"),
-        ("⚙️", "Ops",      "Operations"),
-        ("💵", "Cust Bill","CustomerBilling"),
-        ("🗺️", "Map",      "Map"),
-        ("🔄", "Sync",     "Sync"),
-    ]
-
-    if role in ["super_admin", "system_admin"]:
-        nav_items.append(
-            ("🔩", "Setup", "SystemSetup")
-        )
-    if role == "super_admin":
-        nav_items.append(
-            ("👑", "Admin", "Admin")
-        )
-
-    # Build nav links using Streamlit query params
-    nav_html = '<div class="mobile-nav">'
-    for icon, label, page_key in nav_items:
-        active_class = "active" \
-            if current_page == page_key else ""
-        nav_html += f"""
-        <a href="?nav={page_key}"
-           class="{active_class}"
-           onclick="
-             window.parent.postMessage(
-               {{type:'streamlit:setComponentValue',
-                value:'{page_key}'}}, '*');
-           ">
-            <span class="nav-icon">{icon}</span>
-            {label}
-        </a>"""
-
-    nav_html += "</div>"
-    st.markdown(nav_html, unsafe_allow_html=True)
-
-    # Handle query param navigation
-    params = st.query_params
-    if "nav" in params:
-        nav_val = params["nav"]
-        if nav_val != current_page:
-            st.session_state["page"] = nav_val
-            st.query_params.clear()
-            st.rerun()
 
 
 def show_login():
@@ -510,13 +426,7 @@ def show_sidebar():
 if "user" not in st.session_state:
     show_login()
 else:
-    user = st.session_state.get("user", {})
     page = show_sidebar()
-
-    # Inject mobile bottom navigation
-    inject_mobile_nav(
-        page or "Home", user
-    )
 
     if page == "Home" or page is None:
         from pages.home import show
