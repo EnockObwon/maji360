@@ -92,13 +92,11 @@ def get_report_data(system_id: int,
         == 'Institution'
     )
 
-    # Actual population from database
     pop_estimate = sum(
         getattr(c, 'population', 0) or 0
         for c in customers
     )
 
-    # Per capita litres per person per day
     days = 30 * len(periods)
     per_capita = round(
         (total_consumed * 1000) /
@@ -106,19 +104,81 @@ def get_report_data(system_id: int,
     ) if pop_estimate > 0 and days > 0 else 0
 
     # ── Billing ────────────────────────────────────────
-    all_bills    = session.query(Bill).filter_by(
+    # All bills ever issued for this system
+    all_bills = session.query(Bill).filter_by(
         system_id=system_id
     ).all()
+
+    # Bills issued in selected period
     period_bills = [
         b for b in all_bills
         if b.bill_month in periods
     ]
-    total_billed    = sum(
+    total_billed = sum(
         b.amount or 0 for b in period_bills
     )
-    total_collected = sum(
-        b.amount_paid or 0 for b in period_bills
+
+    # ── Collection rate using payment dates ────────────
+    # Cash collected in selected period
+    # allocated to the month it was received
+    # This matches the Billing page approach
+    try:
+        if month:
+            pay_rows = session.execute(sql_text(
+                "SELECT SUM(amount) FROM payments "
+                "WHERE system_id = :sid "
+                "AND status = 'completed' "
+                "AND TO_CHAR(paid_at, 'YYYY-MM') "
+                "= :period"
+            ), {
+                "sid":    system_id,
+                "period": period
+            }).fetchone()
+        else:
+            pay_rows = session.execute(sql_text(
+                "SELECT SUM(amount) FROM payments "
+                "WHERE system_id = :sid "
+                "AND status = 'completed' "
+                "AND EXTRACT(YEAR FROM paid_at) "
+                "= :year"
+            ), {
+                "sid":  system_id,
+                "year": year
+            }).fetchone()
+        total_collected = float(pay_rows[0] or 0)
+    except Exception:
+        total_collected = sum(
+            b.amount_paid or 0
+            for b in period_bills
+        )
+
+    # ── Overall collection rate ────────────────────────
+    # Total cash ever collected vs total ever billed
+    # This is the Water Board efficiency KPI
+    all_time_billed    = sum(
+        b.amount or 0 for b in all_bills
     )
+    try:
+        all_pay = session.execute(sql_text(
+            "SELECT SUM(amount) FROM payments "
+            "WHERE system_id = :sid "
+            "AND status = 'completed'"
+        ), {"sid": system_id}).fetchone()
+        all_time_collected = float(
+            all_pay[0] or 0
+        )
+    except Exception:
+        all_time_collected = sum(
+            b.amount_paid or 0
+            for b in all_bills
+        )
+
+    overall_collection_rate = round(
+        (all_time_collected / all_time_billed) * 100,
+        1
+    ) if all_time_billed > 0 else 0
+
+    # Period collection rate
     collection_rate = round(
         (total_collected / total_billed) * 100, 1
     ) if total_billed > 0 else 0
@@ -130,15 +190,19 @@ def get_report_data(system_id: int,
                 "SELECT SUM(amount) FROM expenses "
                 "WHERE system_id = :sid "
                 "AND month = :month"
-            ), {"sid":   system_id,
-                "month": period}).fetchone()
+            ), {
+                "sid":   system_id,
+                "month": period
+            }).fetchone()
         else:
             exp_rows = session.execute(sql_text(
                 "SELECT SUM(amount) FROM expenses "
                 "WHERE system_id = :sid "
                 "AND month LIKE :year"
-            ), {"sid":  system_id,
-                "year": f"{year}%"}).fetchone()
+            ), {
+                "sid":  system_id,
+                "year": f"{year}%"
+            }).fetchone()
         total_expenses = float(exp_rows[0] or 0)
     except Exception:
         total_expenses = 0.0
@@ -160,9 +224,11 @@ def get_report_data(system_id: int,
                 "incident_date) = :year "
                 "AND EXTRACT(MONTH FROM "
                 "incident_date) = :month"
-            ), {"sid":   system_id,
+            ), {
+                "sid":   system_id,
                 "year":  year,
-                "month": month}).fetchone()
+                "month": month
+            }).fetchone()
         else:
             maint_rows = session.execute(sql_text(
                 "SELECT COUNT(*), "
@@ -172,8 +238,10 @@ def get_report_data(system_id: int,
                 "WHERE system_id = :sid "
                 "AND EXTRACT(YEAR FROM "
                 "incident_date) = :year"
-            ), {"sid":  system_id,
-                "year": year}).fetchone()
+            ), {
+                "sid":  system_id,
+                "year": year
+            }).fetchone()
         total_incidents    = int(maint_rows[0] or 0)
         resolved_incidents = int(maint_rows[1] or 0)
         total_maint_cost   = float(maint_rows[2] or 0)
@@ -198,38 +266,43 @@ def get_report_data(system_id: int,
     session.close()
 
     return {
-        "system_name":       system.name
-                             if system else "",
-        "district":          system.district
-                             if system else "",
-        "country":           system.country
-                             if system else "",
-        "currency":          system.currency
-                             if system else "UGX",
-        "period_label":      period_label,
-        "periods":           periods,
-        "year":              year,
-        "month":             month,
-        "total_pumped":      round(total_pumped, 1),
-        "total_consumed":    round(total_consumed, 1),
-        "total_nrw_m3":      total_nrw_m3,
-        "nrw_pct":           nrw_pct,
-        "total_customers":   total_customers,
-        "psp_count":         psp_count,
-        "private_count":     private_count,
-        "school_count":      school_count,
-        "institution_count": institution_count,
-        "pop_estimate":      pop_estimate,
-        "per_capita":        per_capita,
-        "total_billed":      round(total_billed, 0),
-        "total_collected":   round(total_collected, 0),
-        "collection_rate":   collection_rate,
-        "total_expenses":    round(total_expenses, 0),
-        "net_surplus":       net_surplus,
-        "total_incidents":   total_incidents,
-        "resolved_incidents": resolved_incidents,
-        "total_maint_cost":  round(total_maint_cost, 0),
-        "avg_tank_pct":      avg_tank_pct
+        "system_name":            system.name
+                                  if system else "",
+        "district":               system.district
+                                  if system else "",
+        "country":                system.country
+                                  if system else "",
+        "currency":               system.currency
+                                  if system else "UGX",
+        "period_label":           period_label,
+        "periods":                periods,
+        "year":                   year,
+        "month":                  month,
+        "total_pumped":           round(total_pumped, 1),
+        "total_consumed":         round(total_consumed, 1),
+        "total_nrw_m3":           total_nrw_m3,
+        "nrw_pct":                nrw_pct,
+        "total_customers":        total_customers,
+        "psp_count":              psp_count,
+        "private_count":          private_count,
+        "school_count":           school_count,
+        "institution_count":      institution_count,
+        "pop_estimate":           pop_estimate,
+        "per_capita":             per_capita,
+        "total_billed":           round(total_billed, 0),
+        "total_collected":        round(total_collected, 0),
+        "collection_rate":        collection_rate,
+        "overall_collection_rate": overall_collection_rate,
+        "all_time_billed":        round(all_time_billed, 0),
+        "all_time_collected":     round(
+            all_time_collected, 0
+        ),
+        "total_expenses":         round(total_expenses, 0),
+        "net_surplus":            net_surplus,
+        "total_incidents":        total_incidents,
+        "resolved_incidents":     resolved_incidents,
+        "total_maint_cost":       round(total_maint_cost, 0),
+        "avg_tank_pct":           avg_tank_pct
     }
 
 
@@ -247,7 +320,194 @@ def generate_excel(system_id: int,
     all_bills = session.query(Bill).filter_by(
         system_id=system_id
     ).all()
+    readings  = session.query(DailyReading).filter(
+        DailyReading.system_id == system_id
+    ).all()
+
+    # Expenses by month
+    try:
+        exp_rows = session.execute(sql_text(
+            "SELECT month, SUM(amount) "
+            "FROM expenses "
+            "WHERE system_id = :sid "
+            "AND month LIKE :year "
+            "GROUP BY month"
+        ), {"sid": system_id,
+            "year": f"{year}%"}).fetchall()
+        expenses_by_month = {
+            r[0]: float(r[1] or 0)
+            for r in exp_rows
+        }
+    except Exception:
+        expenses_by_month = {}
+
+    # Payments by month using paid_at date
+    try:
+        pay_rows = session.execute(sql_text(
+            "SELECT TO_CHAR(paid_at, 'YYYY-MM') "
+            "as pay_month, SUM(amount) "
+            "FROM payments "
+            "WHERE system_id = :sid "
+            "AND status = 'completed' "
+            "AND EXTRACT(YEAR FROM paid_at) = :year "
+            "GROUP BY pay_month"
+        ), {"sid":  system_id,
+            "year": year}).fetchall()
+        payments_by_month = {
+            r[0]: float(r[1] or 0)
+            for r in pay_rows
+        }
+    except Exception:
+        payments_by_month = {}
+
+    # Maintenance by month
+    try:
+        maint_rows = session.execute(sql_text(
+            "SELECT "
+            "EXTRACT(MONTH FROM incident_date) "
+            "as mth, "
+            "COUNT(*), "
+            "SUM(CASE WHEN status='Resolved' "
+            "THEN 1 ELSE 0 END), "
+            "SUM(cost) "
+            "FROM maintenance "
+            "WHERE system_id = :sid "
+            "AND EXTRACT(YEAR FROM "
+            "incident_date) = :year "
+            "GROUP BY mth"
+        ), {"sid":  system_id,
+            "year": year}).fetchall()
+        maint_by_month = {
+            int(r[0]): {
+                "incidents": int(r[1] or 0),
+                "resolved":  int(r[2] or 0),
+                "cost":      float(r[3] or 0)
+            }
+            for r in maint_rows
+        }
+    except Exception:
+        maint_by_month = {}
+
+    # Tank level average
+    try:
+        tank_avg = session.execute(sql_text(
+            "SELECT AVG(pct_full) "
+            "FROM tank_levels "
+            "WHERE system_id = :sid"
+        ), {"sid": system_id}).fetchone()
+        avg_tank_pct = round(
+            float(tank_avg[0] or 0), 1
+        )
+    except Exception:
+        avg_tank_pct = 0.0
+
     session.close()
+
+    # Build monthly production data
+    monthly_production = defaultdict(
+        lambda: {"pumped": 0.0, "consumed": 0.0}
+    )
+    for r in readings:
+        m = r.reading_date.strftime("%Y-%m")
+        if r.water_produced_m3 and \
+           r.water_produced_m3 > 0:
+            monthly_production[m]["pumped"] += \
+                r.water_produced_m3
+        if r.water_consumed_m3 and \
+           r.water_consumed_m3 > 0:
+            monthly_production[m]["consumed"] += \
+                r.water_consumed_m3
+
+    # Bills by month
+    bills_by_month = defaultdict(float)
+    for b in all_bills:
+        if b.bill_month and \
+           b.bill_month.startswith(str(year)):
+            bills_by_month[b.bill_month] += \
+                b.amount or 0
+
+    # Customer counts
+    psp_count         = sum(
+        1 for c in customers
+        if getattr(c, 'connection_type', 'PSP')
+        == 'PSP'
+    )
+    private_count     = sum(
+        1 for c in customers
+        if getattr(c, 'connection_type', 'PSP')
+        == 'Private'
+    )
+    school_count      = sum(
+        1 for c in customers
+        if getattr(c, 'connection_type', 'PSP')
+        == 'School'
+    )
+    institution_count = sum(
+        1 for c in customers
+        if getattr(c, 'connection_type', 'PSP')
+        == 'Institution'
+    )
+    pop_estimate = sum(
+        getattr(c, 'population', 0) or 0
+        for c in customers
+    )
+
+    # Build month data list
+    month_data = []
+    for m_num in range(1, 13):
+        period   = f"{year}-{m_num:02d}"
+        pumped   = round(
+            monthly_production[period]["pumped"], 1
+        )
+        consumed = round(
+            monthly_production[period]["consumed"], 1
+        )
+        nrw_m3   = round(pumped - consumed, 1)
+        nrw_pct  = round(
+            (nrw_m3 / pumped) * 100, 1
+        ) if pumped > 0 else 0
+        billed     = bills_by_month.get(period, 0)
+        collected  = payments_by_month.get(period, 0)
+        coll_rate  = round(
+            (collected / billed) * 100, 1
+        ) if billed > 0 else 0
+        expenses   = expenses_by_month.get(period, 0)
+        surplus    = round(collected - expenses, 0)
+        days       = 30
+        per_cap    = round(
+            (consumed * 1000) /
+            (pop_estimate * days), 1
+        ) if pop_estimate > 0 else 0
+        maint      = maint_by_month.get(m_num, {})
+
+        month_data.append({
+            "total_pumped":       pumped,
+            "total_consumed":     consumed,
+            "total_nrw_m3":       nrw_m3,
+            "nrw_pct":            nrw_pct,
+            "total_customers":    len(customers),
+            "psp_count":          psp_count,
+            "private_count":      private_count,
+            "school_count":       school_count,
+            "institution_count":  institution_count,
+            "pop_estimate":       pop_estimate,
+            "per_capita":         per_cap,
+            "total_billed":       billed,
+            "total_collected":    collected,
+            "collection_rate":    coll_rate,
+            "total_expenses":     expenses,
+            "net_surplus":        surplus,
+            "total_incidents":    maint.get(
+                "incidents", 0
+            ),
+            "resolved_incidents": maint.get(
+                "resolved", 0
+            ),
+            "total_maint_cost":   maint.get(
+                "cost", 0
+            ),
+            "avg_tank_pct":       avg_tank_pct
+        })
 
     output = io.BytesIO()
     writer = pd.ExcelWriter(
@@ -285,6 +545,11 @@ def generate_excel(system_id: int,
         "align": "right",
         "num_format": "0.0"
     })
+    tot_fmt = wb.add_format({
+        "bold": True, "border": 1,
+        "bg_color": "#0a1628",
+        "font_color": "white"
+    })
 
     months_labels = [
         "Jan", "Feb", "Mar", "Apr",
@@ -318,7 +583,6 @@ def generate_excel(system_id: int,
         ws1.write(3, i + 1, m, fmt_header)
 
     row = 4
-
     sections = [
         ("WATER PRODUCTION", [
             ("Pumped (m³)",
@@ -349,7 +613,7 @@ def generate_excel(system_id: int,
         ("FINANCIAL PERFORMANCE", [
             (f"Billed ({currency})",
              "total_billed", fmt_number),
-            (f"Collected ({currency})",
+            (f"Cash collected ({currency})",
              "total_collected", fmt_number),
             ("Collection rate (%)",
              "collection_rate", fmt_decimal),
@@ -377,17 +641,16 @@ def generate_excel(system_id: int,
         row += 1
         for label, key, fmt in indicators:
             ws1.write(row, 0, label, fmt_cell)
-            for i in range(1, 13):
-                data = get_report_data(
-                    system_id, year, i
-                )
-                val = data.get(key, 0)
+            for i, md in enumerate(month_data):
+                val = md.get(key, 0)
                 if key == "nrw_pct" and val >= 20:
                     ws1.write(
-                        row, i, val, fmt_alert
+                        row, i + 1, val, fmt_alert
                     )
                 else:
-                    ws1.write(row, i, val, fmt)
+                    ws1.write(
+                        row, i + 1, val, fmt
+                    )
             row += 1
 
     # ── Sheet 2: DHIS2 Data Entry ──────────────────────
@@ -416,84 +679,79 @@ def generate_excel(system_id: int,
     ws2.write(3, 2, "Unit", fmt_header)
     ws2.write(3, 3, "Notes", fmt_header)
 
-    now        = datetime.now()
-    dhis2_data = get_report_data(
-        system_id, now.year, now.month
-    )
-    curr = dhis2_data.get("currency", "UGX")
+    now = datetime.now()
+    d   = month_data[now.month - 1]
+    curr = currency
 
     dhis2_elements = [
         ("", "", "", ""),
         ("WATER PRODUCTION", "", "",
-         f"Period: {dhis2_data['period_label']}"),
+         f"Period: {now.strftime('%B %Y')}"),
         ("Volume of water produced",
-         dhis2_data["total_pumped"], "m³",
+         d["total_pumped"], "m³",
          "From pump house bulk meter"),
         ("Volume of water consumed",
-         dhis2_data["total_consumed"], "m³",
+         d["total_consumed"], "m³",
          "From tank outlet bulk meter"),
         ("Non-revenue water volume",
-         dhis2_data["total_nrw_m3"], "m³",
+         d["total_nrw_m3"], "m³",
          "Produced minus consumed"),
         ("Non-revenue water rate",
-         dhis2_data["nrw_pct"], "%",
+         d["nrw_pct"], "%",
          "Target: below 20%"),
         ("", "", "", ""),
         ("SERVICE COVERAGE", "", "", ""),
         ("Active water connections",
-         dhis2_data["total_customers"],
-         "connections", "All active customers"),
+         d["total_customers"], "connections",
+         "All active customers"),
         ("PSP connections",
-         dhis2_data["psp_count"],
-         "connections", "Public stand posts"),
+         d["psp_count"], "connections",
+         "Public stand posts"),
         ("Private connections",
-         dhis2_data["private_count"],
-         "connections", "Household connections"),
+         d["private_count"], "connections",
+         "Household connections"),
         ("School connections",
-         dhis2_data["school_count"],
-         "connections", "School taps"),
+         d["school_count"], "connections",
+         "School taps"),
         ("Institution connections",
-         dhis2_data["institution_count"],
-         "connections",
+         d["institution_count"], "connections",
          "Staff quarters, health centres etc"),
         ("Population served",
-         dhis2_data["pop_estimate"],
-         "persons",
+         d["pop_estimate"], "persons",
          "Actual figures from customer register"),
         ("Per capita water consumption",
-         dhis2_data["per_capita"],
-         "L/person/day",
+         d["per_capita"], "L/person/day",
          "Target: 20L/person/day"),
         ("", "", "", ""),
         ("FINANCIAL PERFORMANCE", "", "", ""),
         (f"Revenue billed ({curr})",
-         dhis2_data["total_billed"], curr,
-         "Total bills issued"),
-        (f"Revenue collected ({curr})",
-         dhis2_data["total_collected"], curr,
-         "Actual cash received"),
+         d["total_billed"], curr,
+         "Total bills issued this month"),
+        (f"Cash collected ({curr})",
+         d["total_collected"], curr,
+         "Cash received this month"),
         ("Revenue collection efficiency",
-         dhis2_data["collection_rate"], "%",
-         "Target: above 80%"),
+         d["collection_rate"], "%",
+         "Cash received vs bills issued this month"),
         (f"Operational expenditure ({curr})",
-         dhis2_data["total_expenses"], curr,
+         d["total_expenses"], curr,
          "All operational costs"),
         (f"Revenue surplus/deficit ({curr})",
-         dhis2_data["net_surplus"], curr,
-         "Collected minus expenditure"),
+         d["net_surplus"], curr,
+         "Cash collected minus expenditure"),
         ("", "", "", ""),
         ("ASSET MANAGEMENT", "", "", ""),
         ("Maintenance incidents",
-         dhis2_data["total_incidents"],
-         "incidents", "All reported"),
+         d["total_incidents"], "incidents",
+         "All reported"),
         ("Resolved incidents",
-         dhis2_data["resolved_incidents"],
-         "incidents", "Successfully resolved"),
+         d["resolved_incidents"], "incidents",
+         "Successfully resolved"),
         (f"Maintenance cost ({curr})",
-         dhis2_data["total_maint_cost"], curr,
+         d["total_maint_cost"], curr,
          "Labour and materials"),
         ("Average tank level",
-         dhis2_data["avg_tank_pct"], "%",
+         d["avg_tank_pct"], "%",
          "Average % full from dip readings"),
     ]
 
@@ -518,8 +776,9 @@ def generate_excel(system_id: int,
             if isinstance(value, (int, float)):
                 ws2.write(r, 1, value, fmt_decimal)
             else:
-                ws2.write(r, 1,
-                          value or "", fmt_cell)
+                ws2.write(
+                    r, 1, value or "", fmt_cell
+                )
             ws2.write(r, 2, unit, fmt_cell)
             ws2.write(r, 3, notes, fmt_cell)
 
@@ -584,11 +843,6 @@ def generate_excel(system_id: int,
         ws3.write(idx + 3, 7, rate, fmt_decimal)
 
     tot_row = len(customers) + 3
-    tot_fmt = wb.add_format({
-        "bold": True, "border": 1,
-        "bg_color": "#0a1628",
-        "font_color": "white"
-    })
     ws3.write(tot_row, 0, "TOTAL", tot_fmt)
     ws3.write(tot_row, 1, "", tot_fmt)
     ws3.write(tot_row, 2, "", tot_fmt)
@@ -719,7 +973,6 @@ def show():
         )
 
     # Service coverage
-    # Service coverage
     st.markdown("#### 👥 Service Coverage")
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
@@ -738,6 +991,7 @@ def show():
             "Population",
             f"{data['pop_estimate']:,}"
         )
+
     c1, c2 = st.columns(2)
     with c1:
         st.metric(
@@ -750,9 +1004,15 @@ def show():
             f"{data['avg_tank_pct']}%"
         )
 
-    # Financial
+    # Financial — showing both period and overall
     st.markdown("#### 💰 Financial Performance")
-    c1, c2, c3, c4 = st.columns(4)
+    st.caption(
+        "Collection rate shows cash received in "
+        "the selected period vs bills issued. "
+        "Overall rate shows Water Board efficiency "
+        "across all time."
+    )
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         st.metric(
             f"Billed ({currency})",
@@ -768,12 +1028,20 @@ def show():
             if data["collection_rate"] >= 80 \
             else "🔴"
         st.metric(
-            "Collection rate",
+            "Period rate",
             f"{data['collection_rate']}%",
-            delta=f"{rate_icon} "
-                  f"{'Good' if data['collection_rate'] >= 80 else 'Below target'}"
+            delta=f"{rate_icon} this period"
         )
     with c4:
+        overall_icon = "🟢" \
+            if data["overall_collection_rate"] >= 80 \
+            else "🔴"
+        st.metric(
+            "Overall rate",
+            f"{data['overall_collection_rate']}%",
+            delta=f"{overall_icon} all time"
+        )
+    with c5:
         surplus = data["net_surplus"]
         st.metric(
             f"Net surplus ({currency})",
@@ -816,24 +1084,21 @@ def show():
                 "Volume of water produced",
             "Value":
                 f"{data['total_pumped']:.1f}",
-            "Unit": "m³",
-            "Status": "✓"
+            "Unit": "m³", "Status": "✓"
         },
         {
             "Data Element":
                 "Volume of water consumed",
             "Value":
                 f"{data['total_consumed']:.1f}",
-            "Unit": "m³",
-            "Status": "✓"
+            "Unit": "m³", "Status": "✓"
         },
         {
             "Data Element":
                 "Non-revenue water volume",
             "Value":
                 f"{data['total_nrw_m3']:.1f}",
-            "Unit": "m³",
-            "Status": "✓"
+            "Unit": "m³", "Status": "✓"
         },
         {
             "Data Element":
@@ -847,26 +1112,22 @@ def show():
         {
             "Data Element": "Active connections",
             "Value": str(data["total_customers"]),
-            "Unit": "connections",
-            "Status": "✓"
+            "Unit": "connections", "Status": "✓"
         },
         {
             "Data Element": "PSP connections",
             "Value": str(data["psp_count"]),
-            "Unit": "connections",
-            "Status": "✓"
+            "Unit": "connections", "Status": "✓"
         },
         {
             "Data Element": "Private connections",
             "Value": str(data["private_count"]),
-            "Unit": "connections",
-            "Status": "✓"
+            "Unit": "connections", "Status": "✓"
         },
         {
             "Data Element": "School connections",
             "Value": str(data["school_count"]),
-            "Unit": "connections",
-            "Status": "✓"
+            "Unit": "connections", "Status": "✓"
         },
         {
             "Data Element":
@@ -874,8 +1135,7 @@ def show():
             "Value": str(
                 data["institution_count"]
             ),
-            "Unit": "connections",
-            "Status": "✓"
+            "Unit": "connections", "Status": "✓"
         },
         {
             "Data Element": "Population served",
@@ -888,34 +1148,32 @@ def show():
             "Data Element":
                 "Per capita consumption",
             "Value": f"{data['per_capita']}",
-            "Unit": "L/person/day",
-            "Status": "✓"
+            "Unit": "L/person/day", "Status": "✓"
         },
         {
             "Data Element":
                 f"Revenue billed ({currency})",
             "Value":
                 f"{data['total_billed']:,.0f}",
-            "Unit": currency,
-            "Status": "✓"
+            "Unit": currency, "Status": "✓"
         },
         {
             "Data Element":
-                f"Revenue collected ({currency})",
+                f"Cash collected ({currency})",
             "Value":
                 f"{data['total_collected']:,.0f}",
-            "Unit": currency,
-            "Status": "✓"
+            "Unit": currency, "Status": "✓"
         },
         {
             "Data Element":
-                "Collection efficiency",
+                "Overall collection efficiency",
             "Value":
-                f"{data['collection_rate']}",
+                f"{data['overall_collection_rate']}",
             "Unit": "%",
             "Status": "🟢 Good"
-                      if data["collection_rate"]
-                      >= 80
+                      if data[
+                          "overall_collection_rate"
+                      ] >= 80
                       else "🔴 Below target"
         },
         {
@@ -923,8 +1181,7 @@ def show():
                 f"Expenditure ({currency})",
             "Value":
                 f"{data['total_expenses']:,.0f}",
-            "Unit": currency,
-            "Status": "✓"
+            "Unit": currency, "Status": "✓"
         },
         {
             "Data Element":
@@ -941,8 +1198,7 @@ def show():
                 "Maintenance incidents",
             "Value":
                 str(data["total_incidents"]),
-            "Unit": "incidents",
-            "Status": "✓"
+            "Unit": "incidents", "Status": "✓"
         },
         {
             "Data Element":
@@ -950,16 +1206,14 @@ def show():
             "Value": str(
                 data["resolved_incidents"]
             ),
-            "Unit": "incidents",
-            "Status": "✓"
+            "Unit": "incidents", "Status": "✓"
         },
         {
             "Data Element":
                 f"Maintenance cost ({currency})",
             "Value":
                 f"{data['total_maint_cost']:,.0f}",
-            "Unit": currency,
-            "Status": "✓"
+            "Unit": currency, "Status": "✓"
         },
         {
             "Data Element": "Average tank level",
