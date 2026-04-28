@@ -221,6 +221,8 @@ class DailyReading(Base):
     water_sold_m3      = Column(Float, default=0.0)
     water_consumed_m3  = Column(Float, default=0.0)
     rainfall_mm        = Column(Float)
+    pump_end_reading   = Column(Float)
+    tank_end_reading   = Column(Float)
     mwater_response_id = Column(
         String, unique=True
     )
