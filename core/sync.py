@@ -78,6 +78,47 @@ KR_TO_METER = {
 }
 
 
+def get_last_end_readings(system_id: int,
+                           session) -> tuple:
+    """
+    Get the most recent pump_end_reading and
+    tank_end_reading stored in daily_readings.
+    Returns (last_pump_end, last_tank_end)
+    Both may be None if no previous reading exists.
+    """
+    from sqlalchemy import text as sql_text
+
+    try:
+        pump_row = session.execute(sql_text(
+            "SELECT pump_end_reading "
+            "FROM daily_readings "
+            "WHERE system_id = :sid "
+            "AND pump_end_reading IS NOT NULL "
+            "ORDER BY reading_date DESC "
+            "LIMIT 1"
+        ), {"sid": system_id}).fetchone()
+        last_pump_end = float(pump_row[0]) \
+            if pump_row else None
+    except Exception:
+        last_pump_end = None
+
+    try:
+        tank_row = session.execute(sql_text(
+            "SELECT tank_end_reading "
+            "FROM daily_readings "
+            "WHERE system_id = :sid "
+            "AND tank_end_reading IS NOT NULL "
+            "ORDER BY reading_date DESC "
+            "LIMIT 1"
+        ), {"sid": system_id}).fetchone()
+        last_tank_end = float(tank_row[0]) \
+            if tank_row else None
+    except Exception:
+        last_tank_end = None
+
+    return last_pump_end, last_tank_end
+
+
 def sync_system(system_id: int,
                 log: list = None) -> dict:
     def log_msg(msg: str):
@@ -148,12 +189,42 @@ def sync_system(system_id: int,
 
     log_msg(f"Total responses: {len(all_responses)}")
 
+    # ── Sort responses by date ascending ───────────────
+    # This is critical so we process oldest first
+    # and each reading correctly uses the previous
+    # reading as its start point
+    def get_submitted_date(r):
+        submitted = r.get("submittedOn", "")
+        try:
+            return datetime.fromisoformat(
+                submitted.replace("Z", "+00:00")
+            ) if submitted else datetime.min.replace(
+                tzinfo=timezone.utc
+            )
+        except Exception:
+            return datetime.min.replace(
+                tzinfo=timezone.utc
+            )
+
+    all_responses.sort(key=get_submitted_date)
+
     # ── Get existing response IDs ──────────────────────
     existing_ids = set(
         row[0] for row in session.query(
             DailyReading.mwater_response_id
         ).filter_by(system_id=system_id).all()
         if row[0]
+    )
+
+    # ── Get last stored end readings ───────────────────
+    last_pump_end, last_tank_end = \
+        get_last_end_readings(system_id, session)
+
+    log_msg(
+        f"Last pump end reading: {last_pump_end}"
+    )
+    log_msg(
+        f"Last tank end reading: {last_tank_end}"
     )
 
     # ── Parse and save new readings ────────────────────
@@ -169,14 +240,8 @@ def sync_system(system_id: int,
             continue
 
         data = r.get("data", {})
-        ps   = safe_float(
-            data.get(FIELD_IDS["pump_start"])
-        )
         pe   = safe_float(
             data.get(FIELD_IDS["pump_end"])
-        )
-        ts   = safe_float(
-            data.get(FIELD_IDS["tank_start"])
         )
         te   = safe_float(
             data.get(FIELD_IDS["tank_end"])
@@ -192,16 +257,57 @@ def sync_system(system_id: int,
         except Exception:
             reading_date = datetime.now(timezone.utc)
 
-        pumped   = round(pe - ps, 2) \
-                   if ps is not None \
-                   and pe is not None \
-                   and pe > ps else 0.0
-        consumed = round(te - ts, 2) \
-                   if ts is not None \
-                   and te is not None \
-                   and te > ts else 0.0
+        # ── Calculate pumped volume ────────────────────
+        # Use END reading minus last known END reading
+        # This covers gaps when operator misses days
+        pumped = 0.0
+        if pe is not None:
+            if last_pump_end is not None:
+                diff = round(pe - last_pump_end, 2)
+                # Only count positive differences
+                # Negative means meter reset or error
+                if diff > 0:
+                    pumped = diff
+                elif diff < 0:
+                    log_msg(
+                        f"  ⚠ Pump meter went down "
+                        f"({last_pump_end} → {pe}) "
+                        f"— possible reset or error. "
+                        f"Skipping volume calculation."
+                    )
+            else:
+                # First ever reading — no volume yet
+                # Just store as baseline
+                log_msg(
+                    f"  First pump reading stored "
+                    f"as baseline: {pe}"
+                )
+            last_pump_end = pe
 
-        if pumped == 0 and consumed == 0:
+        # ── Calculate consumed volume ──────────────────
+        # Same approach for tank outlet meter
+        consumed = 0.0
+        if te is not None:
+            if last_tank_end is not None:
+                diff = round(te - last_tank_end, 2)
+                if diff > 0:
+                    consumed = diff
+                elif diff < 0:
+                    log_msg(
+                        f"  ⚠ Tank meter went down "
+                        f"({last_tank_end} → {te}) "
+                        f"— possible reset or error. "
+                        f"Skipping volume calculation."
+                    )
+            else:
+                log_msg(
+                    f"  First tank reading stored "
+                    f"as baseline: {te}"
+                )
+            last_tank_end = te
+
+        # Skip if no useful data at all
+        if pe is None and te is None:
             continue
 
         reading = DailyReading(
@@ -210,6 +316,8 @@ def sync_system(system_id: int,
             water_produced_m3  = pumped,
             water_consumed_m3  = consumed,
             water_sold_m3      = 0.0,
+            pump_end_reading   = pe,
+            tank_end_reading   = te,
             mwater_response_id = resp_id,
             synced_at          = datetime.now(
                 timezone.utc
@@ -456,7 +564,6 @@ def sync_billing(system_id: int,
         return 0
 
     try:
-        # ── Fetch all transactions ─────────────────────
         all_txns = []
         skip     = 0
         while True:
@@ -480,7 +587,6 @@ def sync_billing(system_id: int,
                 break
             skip += 50
 
-        # ── Fetch customer mapping ─────────────────────
         r2 = requests.get(
             f"{cfg['accounts_base']}/customer_accounts",
             params={
@@ -514,7 +620,6 @@ def sync_billing(system_id: int,
             )
         }
 
-        # ── Separate billing and payment txns ──────────
         billing_txns = [
             t for t in all_txns
             if t.get("meter_volume") is not None
@@ -525,7 +630,6 @@ def sync_billing(system_id: int,
             and t.get("customer_account")
         ]
 
-        # ── Total paid per customer ────────────────────
         cust_paid = defaultdict(float)
         for t in payment_txns:
             acc     = t.get("customer_account", "")
@@ -534,7 +638,6 @@ def sync_billing(system_id: int,
             if meter:
                 cust_paid[meter] += t.get("amount", 0)
 
-        # ── Step 1: Add any new bills ──────────────────
         new_bills = 0
         for t in billing_txns:
             cust_acc_id = t.get(
@@ -588,7 +691,6 @@ def sync_billing(system_id: int,
         session.commit()
         log_msg(f"  New bills added: {new_bills}")
 
-        # ── Step 2: Recalculate amount_paid ───────────
         log_msg(
             "  Recalculating payments for "
             "all customers..."
@@ -652,11 +754,6 @@ def sync_payments(system_id: int,
                    session,
                    cfg: dict,
                    log: list) -> int:
-    """
-    Sync individual payment transactions into
-    the payments table for accurate cash flow
-    reporting by payment month.
-    """
     def log_msg(msg):
         if log is not None:
             log.append(msg)
@@ -666,7 +763,6 @@ def sync_payments(system_id: int,
         return 0
 
     try:
-        # Fetch all transactions
         all_txns = []
         skip     = 0
         while True:
@@ -690,7 +786,6 @@ def sync_payments(system_id: int,
                 break
             skip += 50
 
-        # Fetch customer mapping
         r2 = requests.get(
             f"{cfg['accounts_base']}/customer_accounts",
             params={
@@ -724,14 +819,12 @@ def sync_payments(system_id: int,
             )
         }
 
-        # Filter payment transactions
         payment_txns = [
             t for t in all_txns
             if t.get("meter_volume") is None
             and t.get("customer_account")
         ]
 
-        # Get existing payments to avoid duplicates
         from sqlalchemy import text as sql_text
         existing_payments = set()
         try:
@@ -775,7 +868,6 @@ def sync_payments(system_id: int,
             date_only   = date_str[:10]
             paid_at_str = f"{date_only}T00:00:00"
 
-            # Skip if already exists
             key = (customer.id, amount, date_only)
             if key in existing_payments:
                 continue
