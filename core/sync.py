@@ -649,19 +649,20 @@ def sync_customers(
         )
 
         # ── Build meter → account-number map ──────────────
-        meter_code_map  = sys_cfg["meter_code_map"]   # code → meter_no
-        meter_to_account = {}
+        meter_code_map   = sys_cfg["meter_code_map"]  # code → meter_no
+        meter_to_account = {}  # meter_no → account_no (meter_code_map path)
+        acc_name_to_code = {}  # name.lower() → accounts code (name-match path)
 
         if cfg.get("accounts_key") and cfg.get("accounts_base"):
             try:
                 r2 = requests.get(
                     f"{cfg['accounts_base']}/customer_accounts",
-                    params={"client": cfg["accounts_key"], "limit": 50},
+                    params={"client": cfg["accounts_key"], "limit": 200},
                     timeout=15,
                 )
                 r3 = requests.get(
                     f"{cfg['accounts_base']}/customers",
-                    params={"client": cfg["accounts_key"], "limit": 50},
+                    params={"client": cfg["accounts_key"], "limit": 200},
                     timeout=15,
                 )
                 if r2.status_code == 200 and r3.status_code == 200:
@@ -676,6 +677,20 @@ def sync_customers(
                         meter_no = meter_code_map.get(kr_code, "")
                         if meter_no and acc_code:
                             meter_to_account[meter_no] = acc_code
+
+                    # Build name → accounts code map so water points
+                    # without a meter_code_map entry can still be linked
+                    # to billing transactions via customer name matching.
+                    for c in r3.json():
+                        name = (c.get("name") or "").lower().strip()
+                        code = c.get("code", "")
+                        if name and code:
+                            acc_name_to_code[name] = code
+
+                    log_msg(
+                        f"  Accounts name index: "
+                        f"{len(acc_name_to_code)} entries"
+                    )
             except Exception as e:
                 log_msg(f"  Accounts lookup error: {e}")
 
@@ -695,9 +710,19 @@ def sync_customers(
             )
             lon = coords[0] if len(coords) > 0 else None
             lat = coords[1] if len(coords) > 1 else None
-            desc       = wp.get("desc", "")
-            account_no = meter_to_account.get(
-                code, f"{system_name[:3].upper()}-{code}"
+            desc = wp.get("desc", "")
+
+            # Priority for account_no:
+            # 1. meter_to_account (meter_code_map path — Karungu)
+            # 2. Name match with accounts API customer (NYAKABALE)
+            #    Stores the accounts customer code so billing
+            #    transactions can be matched via account_no lookup.
+            # 3. Auto-generated fallback
+            name_key   = name.lower().strip()
+            account_no = (
+                meter_to_account.get(code)
+                or acc_name_to_code.get(name_key)
+                or f"{system_name[:3].upper()}-{code}"
             )
 
             session.add(Customer(
