@@ -57,9 +57,9 @@ st.markdown("""
             margin-bottom : 16px;
         }
         .mobile-topnav .nav-title {
-            color       : #0ea5e9;
-            font-size   : 18px;
-            font-weight : 700;
+            color        : #0ea5e9;
+            font-size    : 18px;
+            font-weight  : 700;
             margin-bottom: 4px;
         }
         .mobile-topnav .nav-user {
@@ -110,6 +110,15 @@ st.markdown("""
 <meta name="apple-mobile-web-app-title" content="Maji360">
 <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/static/icon-192.png">
 """, unsafe_allow_html=True)
+
+
+def _apply_system(systems: list, name: str):
+    """Write a named system into session state."""
+    match = next((s for s in systems if s["name"] == name), None)
+    if match:
+        st.session_state["selected_system_id"]   = match["id"]
+        st.session_state["selected_system_name"] = match["name"]
+        st.session_state["currency"]             = match.get("currency", "UGX")
 
 
 def show_login():
@@ -172,7 +181,7 @@ def show_login():
                 reg_system = st.selectbox(
                     "Water system *", options=list(sys_opts.keys())
                 )
-                reg_reason = st.text_area(
+                st.text_area(
                     "Why do you need access?",
                     placeholder="e.g. Water Board member, donor, government monitor...",
                     height=80
@@ -211,10 +220,10 @@ def show_login():
 
 def show_mobile_nav(current_page: str, user: dict, systems: list):
     """
-    Mobile navigation bar — rendered in main content area.
-    System selection is handled by the sidebar only (single
-    source of truth). This component handles page navigation
-    and shows the active system as read-only text.
+    Mobile navigation bar rendered inside main content.
+    Has its own system selector that stays in sync with the
+    sidebar via on_change callbacks — both write to the same
+    session state keys so neither can override the other.
     """
     role = user.get("role", "viewer")
 
@@ -236,26 +245,37 @@ def show_mobile_nav(current_page: str, user: dict, systems: list):
     if role == "super_admin":
         pages["👑 Admin"] = "Admin"
 
-    system_name = st.session_state.get("selected_system_name", "")
-
     st.markdown(
         f"<div class='mobile-topnav'>"
         f"<div class='nav-title'>💧 Maji360</div>"
         f"<div class='nav-user'>"
         f"{user.get('name', '')} · "
         f"{role.replace('_', ' ').title()}"
-        f"</div>"
-        f"</div>",
+        f"</div></div>",
         unsafe_allow_html=True
     )
 
-    # Current system as read-only text on mobile.
-    # To switch systems on mobile, use the sidebar (tap ">").
-    if system_name:
-        st.markdown(
-            f"<div style='font-size:12px; color:#64748b;"
-            f"padding:2px 0 8px'>📍 {system_name}</div>",
-            unsafe_allow_html=True
+    if len(systems) > 1:
+        sys_names = [s["name"] for s in systems]
+        current   = st.session_state.get("selected_system_name", sys_names[0])
+        if current not in sys_names:
+            current = sys_names[0]
+
+        # Callback: mobile changed → update session state AND
+        # sync the sidebar widget so it shows the same choice.
+        def on_mobile_sys_change():
+            name = st.session_state.get("mobile_sys_select", "")
+            _apply_system(systems, name)
+            st.session_state["sys_selector"] = name
+
+        # Sync mobile widget to current selection before rendering.
+        # This propagates sidebar changes into the mobile selectbox.
+        st.session_state["mobile_sys_select"] = current
+        st.selectbox(
+            "System",
+            options   = sys_names,
+            key       = "mobile_sys_select",
+            on_change = on_mobile_sys_change
         )
 
     page_labels = list(pages.keys())
@@ -267,12 +287,11 @@ def show_mobile_nav(current_page: str, user: dict, systems: list):
 
     selected_label = st.selectbox(
         "Navigate to",
-        options  = page_labels,
-        index    = current_idx,
-        key      = "mobile_page_select"
+        options = page_labels,
+        index   = current_idx,
+        key     = "mobile_page_select"
     )
     selected_page = pages[selected_label]
-
     if selected_page != current_page:
         st.session_state["page"] = selected_page
         st.rerun()
@@ -319,26 +338,35 @@ def show_sidebar():
                 f"{selected['name']}</span>",
                 unsafe_allow_html=True
             )
+            _apply_system(systems, selected["name"])
+
         else:
             sys_names = [s["name"] for s in systems]
             current   = st.session_state.get("selected_system_name", sys_names[0])
-            idx       = sys_names.index(current) if current in sys_names else 0
+            if current not in sys_names:
+                current = sys_names[0]
 
-            # Single authoritative system selector — sidebar only.
-            # Mobile nav reads from session state; it does not
-            # render its own selector, avoiding the override bug.
-            chosen   = st.selectbox(
+            # Callback: sidebar changed → update session state AND
+            # sync the mobile widget so it shows the same choice.
+            def on_sidebar_sys_change():
+                name = st.session_state.get("sys_selector", "")
+                _apply_system(systems, name)
+                st.session_state["mobile_sys_select"] = name
+
+            # Sync sidebar widget to current selection before rendering.
+            # This propagates mobile changes into the sidebar selectbox.
+            st.session_state["sys_selector"] = current
+            st.selectbox(
                 "Water system",
-                options = sys_names,
-                index   = idx,
-                key     = "sys_selector"
+                options   = sys_names,
+                key       = "sys_selector",
+                on_change = on_sidebar_sys_change
             )
-            selected = next(s for s in systems if s["name"] == chosen)
 
-        # Write selection to session state once, here only.
-        st.session_state["selected_system_id"]   = selected["id"]
-        st.session_state["selected_system_name"] = selected["name"]
-        st.session_state["currency"]             = selected.get("currency", "UGX")
+            # Ensure session state is initialised on first render
+            # (callbacks only fire on user interaction, not on load).
+            if not st.session_state.get("selected_system_id"):
+                _apply_system(systems, current)
 
         st.divider()
 
