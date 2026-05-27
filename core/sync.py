@@ -719,11 +719,20 @@ def sync_customers(
             #    transactions can be matched via account_no lookup.
             # 3. Auto-generated fallback
             name_key   = name.lower().strip()
-            account_no = (
+            matched_acc = (
                 meter_to_account.get(code)
                 or acc_name_to_code.get(name_key)
-                or f"{system_name[:3].upper()}-{code}"
             )
+
+            # When accounts API is configured (system has its own
+            # accounting URL), skip water points that have no name
+            # match. They will be inserted correctly by the accounts
+            # API sync below with their proper account codes.
+            # This prevents NYA-... placeholder accounts being created.
+            if not matched_acc and                cfg.get("accounts_key") and cfg.get("accounts_base"):
+                continue
+
+            account_no = matched_acc or                 f"{system_name[:3].upper()}-{code}"
 
             session.add(Customer(
                 system_id  = system_id,
@@ -786,16 +795,12 @@ def _sync_customers_from_accounts(
             log.append(msg)
 
     try:
-        # Try to filter server-side via selector
-        params = {"client": cfg["accounts_key"], "limit": 200}
-        if water_system_id:
-            params["selector"] = json.dumps(
-                {"water_system": water_system_id}
-            )
-
+        # No water_system filter — the accounts_base URL is
+        # already system-specific (e.g. accounting:528 for NYAKABALE).
+        # All customers returned belong to this system.
         r = requests.get(
             f"{cfg['accounts_base']}/customers",
-            params=params,
+            params={"client": cfg["accounts_key"], "limit": 200},
             timeout=15,
         )
         if r.status_code != 200:
@@ -803,26 +808,8 @@ def _sync_customers_from_accounts(
             return 0
 
         acc_customers = r.json()
-        log_msg(
-            f"  Accounts API customers (raw): {len(acc_customers)}"
-        )
-
-        # Client-side filter as a safety net —
-        # if the response objects include a water_system field,
-        # ensure we only keep customers for this system.
-        if water_system_id and acc_customers:
-            if "water_system" in acc_customers[0]:
-                before = len(acc_customers)
-                acc_customers = [
-                    c for c in acc_customers
-                    if c.get("water_system") == water_system_id
-                ]
-                log_msg(
-                    f"  Filtered by water_system: "
-                    f"{before} → {len(acc_customers)}"
-                )
-
-        log_msg(f"  Customers to process: {len(acc_customers)}")
+        log_msg(f"  Accounts API customers: {len(acc_customers)}")
+        log_msg(f"  Customers to process  : {len(acc_customers)}")
 
         # Existing customers for this system (by account_no)
         existing_accounts = set(
