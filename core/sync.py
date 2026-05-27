@@ -1,4 +1,6 @@
+# ══════════════════════════════════════════════════════════════
 # Maji360 · core/sync.py  v2.0  — Multi-System Sync Engine
+# ══════════════════════════════════════════════════════════════
 #
 # Key changes from v1.5:
 #   • All hardcoded GROUP_ID / WATER_SYSTEM_ID / FIELD_IDS /
@@ -9,6 +11,7 @@
 #   • accounts_base / accounts_key can be overridden per-system.
 #   • Every sync run is recorded in sync_logs.
 #   • sync_system() return dict is unchanged — all callers safe.
+# ══════════════════════════════════════════════════════════════
 
 import time
 import requests
@@ -373,11 +376,19 @@ def sync_system(
         all_responses.sort(key=_submitted_dt)
 
         # ── Existing response IDs (skip duplicates) ────────
+        # Check GLOBALLY across all systems, not just the
+        # current one. When two systems share the same form,
+        # each response belongs to exactly one system.
+        # Filtering by system_id misses responses already
+        # stored under a different system_id and causes a
+        # unique constraint violation on mwater_response_id.
         existing_ids = set(
             row[0]
-            for row in session.query(
-                DailyReading.mwater_response_id
-            ).filter_by(system_id=system_id).all()
+            for row in session.execute(sql_text(
+                "SELECT mwater_response_id "
+                "FROM daily_readings "
+                "WHERE mwater_response_id IS NOT NULL"
+            )).fetchall()
             if row[0]
         )
 
@@ -1223,8 +1234,10 @@ def recalculate_nrw(system_id: int, session) -> None:
     session.commit()
 
 
+# ─────────────────────────────────────────────────────────────
 # Private helper: paginated transaction fetch
 # (de-duplicates the identical loop in billing/payments/expenses)
+# ─────────────────────────────────────────────────────────────
 
 def _fetch_all_transactions(
     accounts_base: str, accounts_key: str
