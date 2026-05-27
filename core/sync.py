@@ -1,4 +1,5 @@
 # Maji360 · core/sync.py  v2.0  — Multi-System Sync Engine
+#
 # Key changes from v1.5:
 #   • All hardcoded GROUP_ID / WATER_SYSTEM_ID / FIELD_IDS /
 #     KR_TO_METER removed from module level.
@@ -30,11 +31,12 @@ except ImportError:
     _SYNCLOG_AVAILABLE = False
 
 
+# ─────────────────────────────────────────────────────────────
 # Karungu (system 1) fallback constants
 # Used ONLY when the corresponding column on water_systems
 # is NULL — i.e., before the migration is run or for legacy
 # data. New systems must have their values set in the DB.
-
+# ─────────────────────────────────────────────────────────────
 _DEFAULT_GROUP_ID        = "718ce61fbf4f4742bd1018cabf90d1e8"
 _DEFAULT_WATER_SYSTEM_ID = "b0e76a15-7047-4c5e-a986-e2bba550a4ff"
 
@@ -65,7 +67,9 @@ CONN_TYPE_MAP = {
 }
 
 
+# ─────────────────────────────────────────────────────────────
 # Helpers
+# ─────────────────────────────────────────────────────────────
 
 def get_mwater_config(system: WaterSystem = None) -> dict:
     """
@@ -138,10 +142,12 @@ def _get_system_config(system: WaterSystem) -> dict:
         getattr(system, "mwater_field_ids", None)
         or _DEFAULT_FIELD_IDS
     )
-    meter_code_map = (
-        getattr(system, "meter_code_map", None)
-        or _DEFAULT_METER_CODE_MAP
-    )
+    # Use `is None` — an empty dict {} is intentional for
+    # accounts-based systems (NYAKABALE). Using `or` would
+    # silently replace it with Karungu defaults and block
+    # the accounts API customer sync path.
+    _raw_map       = getattr(system, "meter_code_map", None)
+    meter_code_map = _DEFAULT_METER_CODE_MAP if _raw_map is None else _raw_map
     return {
         "group_id":        group_id,
         "water_system_id": water_system_id,
@@ -234,7 +240,9 @@ def _write_sync_log(
         pass   # never let logging crash a sync
 
 
+# ─────────────────────────────────────────────────────────────
 # Main entry point
+# ─────────────────────────────────────────────────────────────
 
 def sync_system(
     system_id:    int,
@@ -553,7 +561,9 @@ def sync_system(
     return results
 
 
+# ─────────────────────────────────────────────────────────────
 # sync_customers
+# ─────────────────────────────────────────────────────────────
 
 def sync_customers(
     system_id:   int,
@@ -1213,10 +1223,8 @@ def recalculate_nrw(system_id: int, session) -> None:
     session.commit()
 
 
-# ─────────────────────────────────────────────────────────────
 # Private helper: paginated transaction fetch
 # (de-duplicates the identical loop in billing/payments/expenses)
-# ─────────────────────────────────────────────────────────────
 
 def _fetch_all_transactions(
     accounts_base: str, accounts_key: str
