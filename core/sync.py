@@ -729,7 +729,8 @@ def sync_customers(
            cfg.get("accounts_key") and cfg.get("accounts_base"):
             log_msg("  No meter_code_map — syncing from accounts API...")
             new_count += _sync_customers_from_accounts(
-                system_id, session, cfg, log
+                system_id, session, cfg, log,
+                water_system_id=sys_cfg["water_system_id"]
             )
 
         return new_count
@@ -740,25 +741,36 @@ def sync_customers(
 
 
 def _sync_customers_from_accounts(
-    system_id: int,
+    system_id:       int,
     session,
-    cfg:       dict,
-    log:       list,
+    cfg:             dict,
+    log:             list,
+    water_system_id: str = None,
 ) -> int:
     """
     Sync customers directly from the mWater accounts API.
     Used for systems like NYAKABALE where customers are
     managed in the accounts system with numeric IDs
     (10001, 10002...) rather than a meter_code_map.
+
+    Filters to water_system_id so customers from other
+    systems in the same organisation are excluded.
     """
     def log_msg(msg):
         if log is not None:
             log.append(msg)
 
     try:
+        # Try to filter server-side via selector
+        params = {"client": cfg["accounts_key"], "limit": 200}
+        if water_system_id:
+            params["selector"] = json.dumps(
+                {"water_system": water_system_id}
+            )
+
         r = requests.get(
             f"{cfg['accounts_base']}/customers",
-            params={"client": cfg["accounts_key"], "limit": 200},
+            params=params,
             timeout=15,
         )
         if r.status_code != 200:
@@ -766,7 +778,26 @@ def _sync_customers_from_accounts(
             return 0
 
         acc_customers = r.json()
-        log_msg(f"  Accounts API customers found: {len(acc_customers)}")
+        log_msg(
+            f"  Accounts API customers (raw): {len(acc_customers)}"
+        )
+
+        # Client-side filter as a safety net —
+        # if the response objects include a water_system field,
+        # ensure we only keep customers for this system.
+        if water_system_id and acc_customers:
+            if "water_system" in acc_customers[0]:
+                before = len(acc_customers)
+                acc_customers = [
+                    c for c in acc_customers
+                    if c.get("water_system") == water_system_id
+                ]
+                log_msg(
+                    f"  Filtered by water_system: "
+                    f"{before} → {len(acc_customers)}"
+                )
+
+        log_msg(f"  Customers to process: {len(acc_customers)}")
 
         # Existing customers for this system (by account_no)
         existing_accounts = set(
