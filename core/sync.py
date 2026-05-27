@@ -1,7 +1,4 @@
-# ══════════════════════════════════════════════════════════════
 # Maji360 · core/sync.py  v2.0  — Multi-System Sync Engine
-# ══════════════════════════════════════════════════════════════
-#
 # Key changes from v1.5:
 #   • All hardcoded GROUP_ID / WATER_SYSTEM_ID / FIELD_IDS /
 #     KR_TO_METER removed from module level.
@@ -11,7 +8,6 @@
 #   • accounts_base / accounts_key can be overridden per-system.
 #   • Every sync run is recorded in sync_logs.
 #   • sync_system() return dict is unchanged — all callers safe.
-# ══════════════════════════════════════════════════════════════
 
 import time
 import requests
@@ -34,12 +30,11 @@ except ImportError:
     _SYNCLOG_AVAILABLE = False
 
 
-# ─────────────────────────────────────────────────────────────
 # Karungu (system 1) fallback constants
 # Used ONLY when the corresponding column on water_systems
 # is NULL — i.e., before the migration is run or for legacy
 # data. New systems must have their values set in the DB.
-# ─────────────────────────────────────────────────────────────
+
 _DEFAULT_GROUP_ID        = "718ce61fbf4f4742bd1018cabf90d1e8"
 _DEFAULT_WATER_SYSTEM_ID = "b0e76a15-7047-4c5e-a986-e2bba550a4ff"
 
@@ -70,9 +65,7 @@ CONN_TYPE_MAP = {
 }
 
 
-# ─────────────────────────────────────────────────────────────
 # Helpers
-# ─────────────────────────────────────────────────────────────
 
 def get_mwater_config(system: WaterSystem = None) -> dict:
     """
@@ -241,9 +234,7 @@ def _write_sync_log(
         pass   # never let logging crash a sync
 
 
-# ─────────────────────────────────────────────────────────────
 # Main entry point
-# ─────────────────────────────────────────────────────────────
 
 def sync_system(
     system_id:    int,
@@ -562,9 +553,7 @@ def sync_system(
     return results
 
 
-# ─────────────────────────────────────────────────────────────
 # sync_customers
-# ─────────────────────────────────────────────────────────────
 
 def sync_customers(
     system_id:   int,
@@ -708,10 +697,90 @@ def sync_customers(
             )
 
         session.commit()
+
+        # ── Accounts API customer sync ─────────────────────
+        # Used when meter_code_map is empty (e.g. NYAKABALE).
+        # Pulls customers directly from the mWater accounts
+        # system using their numeric IDs (10001, 10002...).
+        # New connections added in mWater are picked up
+        # automatically on the next sync — no map update needed.
+        if not meter_code_map and \
+           cfg.get("accounts_key") and cfg.get("accounts_base"):
+            log_msg("  No meter_code_map — syncing from accounts API...")
+            new_count += _sync_customers_from_accounts(
+                system_id, session, cfg, log
+            )
+
         return new_count
 
     except Exception as e:
         log_msg(f"  Customer sync error: {e}")
+        return 0
+
+
+def _sync_customers_from_accounts(
+    system_id: int,
+    session,
+    cfg:       dict,
+    log:       list,
+) -> int:
+    """
+    Sync customers directly from the mWater accounts API.
+    Used for systems like NYAKABALE where customers are
+    managed in the accounts system with numeric IDs
+    (10001, 10002...) rather than a meter_code_map.
+    """
+    def log_msg(msg):
+        if log is not None:
+            log.append(msg)
+
+    try:
+        r = requests.get(
+            f"{cfg['accounts_base']}/customers",
+            params={"client": cfg["accounts_key"], "limit": 200},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            log_msg(f"  Accounts customers error: {r.status_code}")
+            return 0
+
+        acc_customers = r.json()
+        log_msg(f"  Accounts API customers found: {len(acc_customers)}")
+
+        # Existing customers for this system (by account_no)
+        existing_accounts = set(
+            row[0]
+            for row in session.query(Customer.account_no)
+                              .filter_by(system_id=system_id).all()
+            if row[0]
+        )
+
+        new_count = 0
+        for c in acc_customers:
+            code = str(c.get("code", "")).strip()
+            name = (c.get("name") or f"Customer {code}").strip()
+            if not code or code in existing_accounts:
+                continue
+
+            # account_no = accounts API code (e.g. "10001")
+            # meter_no   = same, used for billing lookup
+            session.add(Customer(
+                system_id  = system_id,
+                name       = name,
+                account_no = code,
+                meter_no   = code,
+                is_active  = True,
+            ))
+            existing_accounts.add(code)
+            new_count += 1
+            log_msg(f"  ✓ {name} (acc={code})")
+
+        session.commit()
+        log_msg(f"  New accounts customers: {new_count}")
+        return new_count
+
+    except Exception as e:
+        log_msg(f"  Accounts customer sync error: {e}")
         return 0
 
 
@@ -771,26 +840,36 @@ def sync_billing(
             and t.get("customer_account")
         ]
 
-        # Build total-paid-per-meter for payment allocation
+        # Build total-paid-per-meter for payment allocation.
+        # For systems with meter_code_map (Karungu): use the
+        # mapped meter serial number as the key.
+        # For systems without (NYAKABALE): use the accounts
+        # customer code directly — it matches meter_no/account_no.
         cust_paid: dict[str, float] = defaultdict(float)
         for t in payment_txns:
             acc     = t.get("customer_account", "")
             kr_code = acc_to_kr.get(acc, "")
-            meter   = meter_code_map.get(kr_code, "")
+            meter   = meter_code_map.get(kr_code) or kr_code
             if meter:
                 cust_paid[meter] += t.get("amount", 0)
 
         new_bills = 0
         for t in billing_txns:
             cust_acc_id = t.get("customer_account", "")
-            kr_code  = acc_to_kr.get(cust_acc_id, "")
-            meter_no = meter_code_map.get(kr_code)
-            if not meter_no:
-                continue
+            kr_code     = acc_to_kr.get(cust_acc_id, "")
 
-            customer = session.query(Customer).filter_by(
-                system_id=system_id, meter_no=meter_no
-            ).first()
+            # Look up customer — meter_code_map path first
+            # (Karungu), then direct account_no fallback (NYAKABALE)
+            meter_no = meter_code_map.get(kr_code)
+            customer = None
+            if meter_no:
+                customer = session.query(Customer).filter_by(
+                    system_id=system_id, meter_no=meter_no
+                ).first()
+            if not customer and kr_code:
+                customer = session.query(Customer).filter_by(
+                    system_id=system_id, account_no=kr_code
+                ).first()
             if not customer:
                 continue
 
@@ -825,9 +904,14 @@ def sync_billing(
         log_msg("  Recalculating payment allocation...")
         updated = 0
         for meter_no, total_paid in cust_paid.items():
-            customer = session.query(Customer).filter_by(
-                system_id=system_id, meter_no=meter_no
-            ).first()
+            customer = (
+                session.query(Customer).filter_by(
+                    system_id=system_id, meter_no=meter_no
+                ).first()
+                or session.query(Customer).filter_by(
+                    system_id=system_id, account_no=meter_no
+                ).first()
+            )
             if not customer:
                 continue
             cust_bills = session.query(Bill).filter_by(
@@ -930,13 +1014,18 @@ def sync_payments(
         for t in payment_txns:
             acc     = t.get("customer_account", "")
             kr_code = acc_to_kr.get(acc, "")
-            meter   = meter_code_map.get(kr_code, "")
+            meter   = meter_code_map.get(kr_code) or kr_code
             if not meter:
                 continue
 
-            customer = session.query(Customer).filter_by(
-                system_id=system_id, meter_no=meter
-            ).first()
+            customer = (
+                session.query(Customer).filter_by(
+                    system_id=system_id, meter_no=meter
+                ).first()
+                or session.query(Customer).filter_by(
+                    system_id=system_id, account_no=meter
+                ).first()
+            )
             if not customer:
                 continue
 
