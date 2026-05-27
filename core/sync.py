@@ -1,70 +1,56 @@
-# ── Maji360 · core/sync.py ─────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# Maji360 · core/sync.py  v2.0  — Multi-System Sync Engine
+# ══════════════════════════════════════════════════════════════
+#
+# Key changes from v1.5:
+#   • All hardcoded GROUP_ID / WATER_SYSTEM_ID / FIELD_IDS /
+#     KR_TO_METER removed from module level.
+#   • Values are now loaded per-system from water_systems table
+#     (mwater_group_id, mwater_water_system_id, mwater_field_ids,
+#     meter_code_map) with safe fallbacks for Karungu (system 1).
+#   • accounts_base / accounts_key can be overridden per-system.
+#   • Every sync run is recorded in sync_logs.
+#   • sync_system() return dict is unchanged — all callers safe.
+# ══════════════════════════════════════════════════════════════
+
+import time
 import requests
 import json
 from datetime import datetime, timezone
 from collections import defaultdict
+from sqlalchemy import text as sql_text
+
 from core.database import (
     get_session, WaterSystem, DailyReading,
-    Bill, Customer, NRWRecord
+    Bill, Customer, NRWRecord,
 )
 
-
-def get_mwater_config():
-    try:
-        import streamlit as st
-        return {
-            "client_key":    st.secrets["MWATER_CLIENT_KEY"],
-            "v3_base":       st.secrets["MWATER_V3_BASE"],
-            "accounts_key":  st.secrets["ACCOUNTS_CLIENT_KEY"],
-            "accounts_base": st.secrets["ACCOUNTS_BASE"],
-        }
-    except Exception:
-        import os
-        return {
-            "client_key":    os.environ.get(
-                "MWATER_CLIENT_KEY", ""
-            ),
-            "v3_base":       os.environ.get(
-                "MWATER_V3_BASE",
-                "https://api.mwater.co/v3"
-            ),
-            "accounts_key":  os.environ.get(
-                "ACCOUNTS_CLIENT_KEY", ""
-            ),
-            "accounts_base": os.environ.get(
-                "ACCOUNTS_BASE", ""
-            ),
-        }
+# ── Try importing SyncLog; graceful fallback if migration not ─
+# ── yet applied (scheduler will still work, just no log rows) ─
+try:
+    from core.database import SyncLog
+    _SYNCLOG_AVAILABLE = True
+except ImportError:
+    _SYNCLOG_AVAILABLE = False
 
 
-def safe_float(val):
-    if val is None:
-        return None
-    if isinstance(val, dict):
-        val = val.get("value")
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return None
+# ─────────────────────────────────────────────────────────────
+# Karungu (system 1) fallback constants
+# Used ONLY when the corresponding column on water_systems
+# is NULL — i.e., before the migration is run or for legacy
+# data. New systems must have their values set in the DB.
+# ─────────────────────────────────────────────────────────────
+_DEFAULT_GROUP_ID        = "718ce61fbf4f4742bd1018cabf90d1e8"
+_DEFAULT_WATER_SYSTEM_ID = "b0e76a15-7047-4c5e-a986-e2bba550a4ff"
 
-
-FIELD_IDS = {
+_DEFAULT_FIELD_IDS = {
     "pump_start": "7411292765fa4fb7a0217bfb001ab167",
     "pump_end":   "3456b8d568fe46b49dd0843a58cdc143",
     "tank_start": "f1c488eb7ec248a8a6d1208ba8f4b06a",
     "tank_end":   "9cae2fe4ea6b4940bb800253123b7565",
 }
 
-WATER_SYSTEM_ID = "b0e76a15-7047-4c5e-a986-e2bba550a4ff"
-GROUP_ID        = "718ce61fbf4f4742bd1018cabf90d1e8"
-
-CONN_TYPE_MAP = {
-    "Piped into public tap or basin": "PSP",
-    "Piped into yard/plot":           "Private",
-    None:                             "PSP"
-}
-
-KR_TO_METER = {
+_DEFAULT_METER_CODE_MAP = {
     "KR1":  "659279453",
     "KR2":  "659279460",
     "KR3":  "659279501",
@@ -77,28 +63,116 @@ KR_TO_METER = {
     "KR10": "659280891",
 }
 
+CONN_TYPE_MAP = {
+    "Piped into public tap or basin": "PSP",
+    "Piped into yard/plot":           "Private",
+    None:                             "PSP",
+}
 
-def get_last_end_readings(system_id: int,
-                           session) -> tuple:
-    """
-    Get the most recent pump_end_reading and
-    tank_end_reading stored in daily_readings.
-    Returns (last_pump_end, last_tank_end)
-    Both may be None if no previous reading exists.
-    """
-    from sqlalchemy import text as sql_text
 
+# ─────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────
+
+def get_mwater_config(system: WaterSystem = None) -> dict:
+    """
+    Build the API config dict.
+    If `system` has non-null accounts_base / accounts_key,
+    those override the global secrets — useful when the
+    second system belongs to a different mWater organisation.
+    """
+    try:
+        import streamlit as st
+        base_cfg = {
+            "client_key":    st.secrets["MWATER_CLIENT_KEY"],
+            "v3_base":       st.secrets["MWATER_V3_BASE"],
+            "accounts_key":  st.secrets["ACCOUNTS_CLIENT_KEY"],
+            "accounts_base": st.secrets["ACCOUNTS_BASE"],
+        }
+    except Exception:
+        import os
+        base_cfg = {
+            "client_key":    os.environ.get(
+                "MWATER_CLIENT_KEY", ""
+            ),
+            "v3_base":       os.environ.get(
+                "MWATER_V3_BASE",
+                "https://api.mwater.co/v3",
+            ),
+            "accounts_key":  os.environ.get(
+                "ACCOUNTS_CLIENT_KEY", ""
+            ),
+            "accounts_base": os.environ.get(
+                "ACCOUNTS_BASE", ""
+            ),
+        }
+
+    # Per-system overrides (only when set)
+    if system:
+        if getattr(system, "accounts_base", None):
+            base_cfg["accounts_base"] = system.accounts_base
+        if getattr(system, "accounts_key", None):
+            base_cfg["accounts_key"] = system.accounts_key
+
+    return base_cfg
+
+
+def safe_float(val) -> float | None:
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        val = val.get("value")
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_system_config(system: WaterSystem) -> dict:
+    """
+    Extract per-system mWater identifiers with safe fallbacks.
+    Returns a dict consumed by sync sub-functions.
+    """
+    group_id = (
+        getattr(system, "mwater_group_id", None)
+        or _DEFAULT_GROUP_ID
+    )
+    water_system_id = (
+        getattr(system, "mwater_water_system_id", None)
+        or _DEFAULT_WATER_SYSTEM_ID
+    )
+    field_ids = (
+        getattr(system, "mwater_field_ids", None)
+        or _DEFAULT_FIELD_IDS
+    )
+    meter_code_map = (
+        getattr(system, "meter_code_map", None)
+        or _DEFAULT_METER_CODE_MAP
+    )
+    return {
+        "group_id":        group_id,
+        "water_system_id": water_system_id,
+        "field_ids":       field_ids,
+        "meter_code_map":  meter_code_map,
+    }
+
+
+def get_last_end_readings(
+    system_id: int, session
+) -> tuple[float | None, float | None]:
+    """
+    Most recent pump_end_reading and tank_end_reading
+    stored in daily_readings for this system.
+    """
     try:
         pump_row = session.execute(sql_text(
             "SELECT pump_end_reading "
             "FROM daily_readings "
             "WHERE system_id = :sid "
-            "AND pump_end_reading IS NOT NULL "
-            "ORDER BY reading_date DESC "
-            "LIMIT 1"
+            "  AND pump_end_reading IS NOT NULL "
+            "ORDER BY reading_date DESC LIMIT 1"
         ), {"sid": system_id}).fetchone()
-        last_pump_end = float(pump_row[0]) \
-            if pump_row else None
+        last_pump_end = float(pump_row[0]) if pump_row else None
     except Exception:
         last_pump_end = None
 
@@ -107,304 +181,415 @@ def get_last_end_readings(system_id: int,
             "SELECT tank_end_reading "
             "FROM daily_readings "
             "WHERE system_id = :sid "
-            "AND tank_end_reading IS NOT NULL "
-            "ORDER BY reading_date DESC "
-            "LIMIT 1"
+            "  AND tank_end_reading IS NOT NULL "
+            "ORDER BY reading_date DESC LIMIT 1"
         ), {"sid": system_id}).fetchone()
-        last_tank_end = float(tank_row[0]) \
-            if tank_row else None
+        last_tank_end = float(tank_row[0]) if tank_row else None
     except Exception:
         last_tank_end = None
 
     return last_pump_end, last_tank_end
 
 
-def sync_system(system_id: int,
-                log: list = None) -> dict:
+def _write_sync_log(
+    session,
+    system_id:        int,
+    triggered_by:     str,
+    status:           str,
+    results:          dict,
+    duration_seconds: float,
+    log_lines:        list,
+    error_message:    str | None = None,
+) -> None:
+    """
+    Persist a SyncLog row and update water_systems.last_synced_at.
+    Silent on failure so a log error never breaks a sync run.
+    """
+    try:
+        if _SYNCLOG_AVAILABLE:
+            log_row = SyncLog(
+                system_id        = system_id,
+                synced_at        = datetime.now(timezone.utc),
+                triggered_by     = triggered_by,
+                status           = status,
+                new_readings     = results.get("new_pump", 0)
+                                 + results.get("new_tank", 0),
+                new_customers    = results.get("new_customers", 0),
+                new_bills        = results.get("new_bills", 0),
+                new_payments     = results.get("new_payments", 0),
+                new_expenses     = results.get("new_expenses", 0),
+                duplicates       = results.get("duplicates", 0),
+                error_message    = error_message,
+                duration_seconds = duration_seconds,
+                log_lines        = log_lines,
+            )
+            session.add(log_row)
+
+        # Always stamp the system row regardless of SyncLog
+        session.execute(sql_text("""
+            UPDATE water_systems
+            SET last_synced_at = :ts,
+                sync_status    = :status
+            WHERE id = :sid
+        """), {
+            "ts":     datetime.now(timezone.utc),
+            "status": status,
+            "sid":    system_id,
+        })
+        session.commit()
+    except Exception:
+        pass   # never let logging crash a sync
+
+
+# ─────────────────────────────────────────────────────────────
+# Main entry point
+# ─────────────────────────────────────────────────────────────
+
+def sync_system(
+    system_id:    int,
+    log:          list = None,
+    triggered_by: str  = "manual",
+) -> dict:
+    """
+    Sync one water system from mWater.
+
+    Parameters
+    ----------
+    system_id    : row id in water_systems table
+    log          : list to append progress strings to
+    triggered_by : 'manual' | 'scheduler' | 'admin'
+
+    Returns
+    -------
+    dict with keys: system, new_pump, new_tank,
+                    new_customers, new_bills,
+                    new_payments, new_expenses,
+                    duplicates, synced_at, error (opt)
+    """
+    t_start = time.time()
+
     def log_msg(msg: str):
         if log is not None:
             log.append(msg)
 
-    cfg     = get_mwater_config()
     session = get_session()
-    system  = session.query(WaterSystem).filter_by(
-        id=system_id
-    ).first()
+    results = {}
+    status  = "success"
+    err_msg = None
 
-    if not system:
-        session.close()
-        return {"error": "System not found"}
+    try:
+        system = session.query(WaterSystem).filter_by(
+            id=system_id
+        ).first()
 
-    system_name = system.name
-    form_id     = system.mwater_form_id
+        if not system:
+            session.close()
+            return {"error": f"System id={system_id} not found"}
 
-    log_msg(f"Syncing {system_name}...")
-    log_msg(f"Form ID: {form_id}")
+        system_name = system.name
+        form_id     = system.mwater_form_id
+        sys_cfg     = _get_system_config(system)
+        cfg         = get_mwater_config(system)
 
-    # ── Fetch all mWater responses ─────────────────────
-    log_msg("Fetching mWater responses...")
-    all_responses = []
-    skip = 0
+        log_msg(f"{'─'*44}")
+        log_msg(f"Syncing  : {system_name}  (id={system_id})")
+        log_msg(f"Form ID  : {form_id}")
+        log_msg(f"Group ID : {sys_cfg['group_id']}")
+        log_msg(f"WS UUID  : {sys_cfg['water_system_id']}")
+        log_msg(f"{'─'*44}")
 
-    while True:
-        try:
-            resp = requests.get(
-                f"{cfg['v3_base']}/responses",
-                params={
-                    "client":   cfg["client_key"],
-                    "selector": json.dumps(
-                        {"form": form_id}
-                    ),
-                    "limit":    100,
-                    "skip":     skip
-                },
-                timeout=60
+        if not form_id:
+            err_msg = "mwater_form_id is not set for this system"
+            log_msg(f"✗ {err_msg}")
+            _write_sync_log(
+                session, system_id, triggered_by,
+                "error", {}, 0.0, log or [], err_msg
             )
-            if resp.status_code != 200:
-                log_msg(
-                    f"mWater error: {resp.status_code}"
+            session.close()
+            return {"error": err_msg, "system": system_name}
+
+        # ── Fetch all mWater responses ─────────────────────
+        log_msg("Fetching mWater responses...")
+        all_responses = []
+        skip = 0
+
+        while True:
+            try:
+                resp = requests.get(
+                    f"{cfg['v3_base']}/responses",
+                    params={
+                        "client":   cfg["client_key"],
+                        "selector": json.dumps(
+                            {"form": form_id}
+                        ),
+                        "limit": 100,
+                        "skip":  skip,
+                    },
+                    timeout=60,
                 )
+                if resp.status_code != 200:
+                    log_msg(
+                        f"  mWater API error: "
+                        f"{resp.status_code} — "
+                        f"{resp.text[:120]}"
+                    )
+                    break
+
+                batch = [
+                    r for r in resp.json()
+                    if r.get("form") == form_id
+                ]
+                if not batch:
+                    break
+
+                all_responses.extend(batch)
+                log_msg(
+                    f"  Fetched {len(all_responses)} "
+                    f"responses..."
+                )
+                if len(batch) < 100:
+                    break
+                skip += 100
+
+            except Exception as e:
+                log_msg(f"  Fetch error: {e}")
                 break
 
-            batch = [
-                r for r in resp.json()
-                if r.get("form") == form_id
-            ]
-            if not batch:
-                break
+        log_msg(f"Total responses : {len(all_responses)}")
 
-            all_responses.extend(batch)
-            log_msg(
-                f"  Fetched {len(all_responses)} "
-                f"responses..."
-            )
+        # ── Sort oldest-first (cumulative calc depends on order)
+        def _submitted_dt(r):
+            s = r.get("submittedOn", "")
+            try:
+                return datetime.fromisoformat(
+                    s.replace("Z", "+00:00")
+                ) if s else datetime.min.replace(
+                    tzinfo=timezone.utc
+                )
+            except Exception:
+                return datetime.min.replace(
+                    tzinfo=timezone.utc
+                )
 
-            if len(batch) < 100:
-                break
-            skip += 100
+        all_responses.sort(key=_submitted_dt)
 
-        except Exception as e:
-            log_msg(f"Fetch error: {e}")
-            break
+        # ── Existing response IDs (skip duplicates) ────────
+        existing_ids = set(
+            row[0]
+            for row in session.query(
+                DailyReading.mwater_response_id
+            ).filter_by(system_id=system_id).all()
+            if row[0]
+        )
 
-    log_msg(f"Total responses: {len(all_responses)}")
+        # ── Cumulative baseline readings ───────────────────
+        last_pump_end, last_tank_end = \
+            get_last_end_readings(system_id, session)
+        log_msg(f"Last pump end   : {last_pump_end}")
+        log_msg(f"Last tank end   : {last_tank_end}")
 
-    # ── Sort responses by date ascending ───────────────
-    # This is critical so we process oldest first
-    # and each reading correctly uses the previous
-    # reading as its start point
-    def get_submitted_date(r):
-        submitted = r.get("submittedOn", "")
+        # ── Field IDs for this system ──────────────────────
+        fids     = sys_cfg["field_ids"]
+        pump_end_fid = fids.get(
+            "pump_end", _DEFAULT_FIELD_IDS["pump_end"]
+        )
+        tank_end_fid = fids.get(
+            "tank_end", _DEFAULT_FIELD_IDS["tank_end"]
+        )
+
+        # ── Parse and save new readings ────────────────────
+        new_pump   = 0
+        new_tank   = 0
+        duplicates = 0
+
+        for r in all_responses:
+            resp_id = r.get("_id", r.get("id", ""))
+            if resp_id in existing_ids:
+                duplicates += 1
+                continue
+
+            data = r.get("data", {})
+            pe   = safe_float(data.get(pump_end_fid))
+            te   = safe_float(data.get(tank_end_fid))
+
+            submitted = r.get("submittedOn", "")
+            try:
+                reading_date = datetime.fromisoformat(
+                    submitted.replace("Z", "+00:00")
+                ) if submitted else datetime.now(timezone.utc)
+            except Exception:
+                reading_date = datetime.now(timezone.utc)
+
+            # ── Cumulative pump volume ─────────────────────
+            pumped = 0.0
+            if pe is not None:
+                if last_pump_end is not None:
+                    diff = round(pe - last_pump_end, 2)
+                    if diff > 0:
+                        pumped = diff
+                    elif diff < 0:
+                        log_msg(
+                            f"  ⚠ Pump meter went backwards "
+                            f"({last_pump_end} → {pe}) — "
+                            f"skipping volume."
+                        )
+                else:
+                    log_msg(
+                        f"  First pump baseline: {pe}"
+                    )
+                last_pump_end = pe
+
+            # ── Cumulative tank volume ─────────────────────
+            consumed = 0.0
+            if te is not None:
+                if last_tank_end is not None:
+                    diff = round(te - last_tank_end, 2)
+                    if diff > 0:
+                        consumed = diff
+                    elif diff < 0:
+                        log_msg(
+                            f"  ⚠ Tank meter went backwards "
+                            f"({last_tank_end} → {te}) — "
+                            f"skipping volume."
+                        )
+                else:
+                    log_msg(
+                        f"  First tank baseline: {te}"
+                    )
+                last_tank_end = te
+
+            if pe is None and te is None:
+                continue
+
+            session.add(DailyReading(
+                system_id          = system_id,
+                reading_date       = reading_date,
+                water_produced_m3  = pumped,
+                water_consumed_m3  = consumed,
+                water_sold_m3      = 0.0,
+                pump_end_reading   = pe,
+                tank_end_reading   = te,
+                mwater_response_id = resp_id,
+                synced_at          = datetime.now(timezone.utc),
+            ))
+            existing_ids.add(resp_id)
+
+            if pumped   > 0: new_pump += 1
+            if consumed > 0: new_tank += 1
+
+        session.commit()
+        log_msg(f"New pump readings : {new_pump}")
+        log_msg(f"New tank readings : {new_tank}")
+        log_msg(f"Duplicates skipped: {duplicates}")
+
+        # ── Customers ──────────────────────────────────────
+        log_msg("Syncing customers from mWater...")
+        new_customers = sync_customers(
+            system_id, system_name, form_id,
+            session, cfg, sys_cfg, log,
+        )
+        log_msg(f"New customers     : {new_customers}")
+
+        # ── Billing ────────────────────────────────────────
+        log_msg("Syncing billing...")
+        new_bills = sync_billing(
+            system_id, session, cfg, sys_cfg, log
+        )
+        log_msg(f"New bills         : {new_bills}")
+
+        # ── Payments ───────────────────────────────────────
+        log_msg("Syncing payments...")
+        new_payments = sync_payments(
+            system_id, session, cfg, sys_cfg, log
+        )
+        log_msg(f"New payments      : {new_payments}")
+
+        # ── Expenses ───────────────────────────────────────
+        log_msg("Syncing expenses...")
+        new_expenses = sync_expenses(
+            system_id, session, cfg, log
+        )
+        log_msg(f"New expenses      : {new_expenses}")
+
+        # ── NRW recalculation ──────────────────────────────
+        log_msg("Recalculating NRW...")
+        recalculate_nrw(system_id, session)
+
+        duration = round(time.time() - t_start, 1)
+        log_msg(f"✓ Sync complete in {duration}s")
+
+        results = {
+            "system":        system_name,
+            "new_pump":      new_pump,
+            "new_tank":      new_tank,
+            "new_customers": new_customers,
+            "new_bills":     new_bills,
+            "new_payments":  new_payments,
+            "new_expenses":  new_expenses,
+            "duplicates":    duplicates,
+            "synced_at":     datetime.now(timezone.utc).isoformat(),
+        }
+
+        _write_sync_log(
+            session, system_id, triggered_by,
+            status, results, duration, log or [],
+        )
+
+    except Exception as e:
+        duration = round(time.time() - t_start, 1)
+        err_msg  = str(e)
+        status   = "error"
+        log_msg(f"✗ Sync error: {e}")
+        results  = {
+            "system":   getattr(system, "name", f"id={system_id}"),
+            "error":    err_msg,
+            "synced_at": datetime.now(timezone.utc).isoformat(),
+        }
         try:
-            return datetime.fromisoformat(
-                submitted.replace("Z", "+00:00")
-            ) if submitted else datetime.min.replace(
-                tzinfo=timezone.utc
+            _write_sync_log(
+                session, system_id, triggered_by,
+                status, results, duration, log or [], err_msg
             )
         except Exception:
-            return datetime.min.replace(
-                tzinfo=timezone.utc
-            )
+            pass
 
-    all_responses.sort(key=get_submitted_date)
-
-    # ── Get existing response IDs ──────────────────────
-    existing_ids = set(
-        row[0] for row in session.query(
-            DailyReading.mwater_response_id
-        ).filter_by(system_id=system_id).all()
-        if row[0]
-    )
-
-    # ── Get last stored end readings ───────────────────
-    last_pump_end, last_tank_end = \
-        get_last_end_readings(system_id, session)
-
-    log_msg(
-        f"Last pump end reading: {last_pump_end}"
-    )
-    log_msg(
-        f"Last tank end reading: {last_tank_end}"
-    )
-
-    # ── Parse and save new readings ────────────────────
-    new_pump   = 0
-    new_tank   = 0
-    duplicates = 0
-
-    for r in all_responses:
-        resp_id = r.get("_id", r.get("id", ""))
-
-        if resp_id in existing_ids:
-            duplicates += 1
-            continue
-
-        data = r.get("data", {})
-        pe   = safe_float(
-            data.get(FIELD_IDS["pump_end"])
-        )
-        te   = safe_float(
-            data.get(FIELD_IDS["tank_end"])
-        )
-
-        submitted = r.get("submittedOn", "")
+    finally:
         try:
-            reading_date = datetime.fromisoformat(
-                submitted.replace("Z", "+00:00")
-            ) if submitted else datetime.now(
-                timezone.utc
-            )
+            session.close()
         except Exception:
-            reading_date = datetime.now(timezone.utc)
+            pass
 
-        # ── Calculate pumped volume ────────────────────
-        # Use END reading minus last known END reading
-        # This covers gaps when operator misses days
-        pumped = 0.0
-        if pe is not None:
-            if last_pump_end is not None:
-                diff = round(pe - last_pump_end, 2)
-                # Only count positive differences
-                # Negative means meter reset or error
-                if diff > 0:
-                    pumped = diff
-                elif diff < 0:
-                    log_msg(
-                        f"  ⚠ Pump meter went down "
-                        f"({last_pump_end} → {pe}) "
-                        f"— possible reset or error. "
-                        f"Skipping volume calculation."
-                    )
-            else:
-                # First ever reading — no volume yet
-                # Just store as baseline
-                log_msg(
-                    f"  First pump reading stored "
-                    f"as baseline: {pe}"
-                )
-            last_pump_end = pe
-
-        # ── Calculate consumed volume ──────────────────
-        # Same approach for tank outlet meter
-        consumed = 0.0
-        if te is not None:
-            if last_tank_end is not None:
-                diff = round(te - last_tank_end, 2)
-                if diff > 0:
-                    consumed = diff
-                elif diff < 0:
-                    log_msg(
-                        f"  ⚠ Tank meter went down "
-                        f"({last_tank_end} → {te}) "
-                        f"— possible reset or error. "
-                        f"Skipping volume calculation."
-                    )
-            else:
-                log_msg(
-                    f"  First tank reading stored "
-                    f"as baseline: {te}"
-                )
-            last_tank_end = te
-
-        # Skip if no useful data at all
-        if pe is None and te is None:
-            continue
-
-        reading = DailyReading(
-            system_id          = system_id,
-            reading_date       = reading_date,
-            water_produced_m3  = pumped,
-            water_consumed_m3  = consumed,
-            water_sold_m3      = 0.0,
-            pump_end_reading   = pe,
-            tank_end_reading   = te,
-            mwater_response_id = resp_id,
-            synced_at          = datetime.now(
-                timezone.utc
-            )
-        )
-        session.add(reading)
-        existing_ids.add(resp_id)
-
-        if pumped > 0:
-            new_pump += 1
-        if consumed > 0:
-            new_tank += 1
-
-    session.commit()
-    log_msg(f"New pump readings : {new_pump}")
-    log_msg(f"New tank readings : {new_tank}")
-    log_msg(f"Duplicates skipped: {duplicates}")
-
-    # ── Sync customers ─────────────────────────────────
-    log_msg("Syncing customers from mWater...")
-    new_customers = sync_customers(
-        system_id, system_name, form_id,
-        session, cfg, log
-    )
-    log_msg(f"New customers synced: {new_customers}")
-
-    # ── Sync billing ───────────────────────────────────
-    log_msg("Syncing billing transactions...")
-    new_bills = sync_billing(
-        system_id, session, cfg, log
-    )
-    log_msg(f"New bills synced  : {new_bills}")
-
-    # ── Sync payments ──────────────────────────────────
-    log_msg("Syncing payment transactions...")
-    new_payments = sync_payments(
-        system_id, session, cfg, log
-    )
-    log_msg(f"New payments synced: {new_payments}")
-
-    # ── Sync expenses ──────────────────────────────────
-    log_msg("Syncing expenses...")
-    new_expenses = sync_expenses(
-        system_id, session, cfg, log
-    )
-    log_msg(f"New expenses synced: {new_expenses}")
-
-    # ── Recalculate NRW ────────────────────────────────
-    log_msg("Recalculating NRW...")
-    recalculate_nrw(system_id, session)
-
-    session.close()
-
-    log_msg("✓ Sync complete.")
-    return {
-        "system":        system_name,
-        "new_pump":      new_pump,
-        "new_tank":      new_tank,
-        "new_customers": new_customers,
-        "new_bills":     new_bills,
-        "new_payments":  new_payments,
-        "new_expenses":  new_expenses,
-        "duplicates":    duplicates,
-        "synced_at":     datetime.now(
-            timezone.utc
-        ).isoformat()
-    }
+    return results
 
 
-def sync_customers(system_id: int,
-                   system_name: str,
-                   form_id: str,
-                   session,
-                   cfg: dict,
-                   log: list) -> int:
+# ─────────────────────────────────────────────────────────────
+# sync_customers
+# ─────────────────────────────────────────────────────────────
+
+def sync_customers(
+    system_id:   int,
+    system_name: str,
+    form_id:     str,
+    session,
+    cfg:         dict,
+    sys_cfg:     dict,   # ← new: per-system identifiers
+    log:         list,
+) -> int:
+
     def log_msg(msg):
         if log is not None:
             log.append(msg)
 
     if not cfg.get("client_key") or not form_id:
-        log_msg(
-            "  No mWater config — skipping "
-            "customer sync"
-        )
+        log_msg("  No mWater config — skipping customers")
         return 0
 
+    # Per-system values (no module-level constants)
+    group_id        = sys_cfg["group_id"]
+    water_system_id = sys_cfg["water_system_id"]
+
     try:
+        # ── Fetch water points for this group ──────────────
         all_wps = []
         skip    = 0
         while True:
@@ -413,16 +598,14 @@ def sync_customers(system_id: int,
                 params={
                     "client":   cfg["client_key"],
                     "selector": json.dumps({
-                        "_managed_by":
-                            f"group:{GROUP_ID}"
+                        "_managed_by": f"group:{group_id}"
                     }),
                     "limit": 50,
-                    "skip":  skip
+                    "skip":  skip,
                 },
-                timeout=30
+                timeout=30,
             )
-            if r.status_code != 200 or \
-               not r.text.strip():
+            if r.status_code != 200 or not r.text.strip():
                 break
             batch = r.json()
             if not batch:
@@ -432,95 +615,79 @@ def sync_customers(system_id: int,
                 break
             skip += 50
 
+        # Filter to this specific water system
+        wps_for_system = [
+            wp for wp in all_wps
+            if wp.get("water_system") == water_system_id
+        ]
+
         log_msg(
-            f"  mWater water points found: "
-            f"{len(all_wps)}"
+            f"  Water points in group  : {len(all_wps)}"
+        )
+        log_msg(
+            f"  Matching this system   : {len(wps_for_system)}"
         )
 
         existing_meters = set(
-            row[0] for row in session.query(
-                Customer.meter_no
-            ).filter_by(system_id=system_id).all()
+            row[0]
+            for row in session.query(Customer.meter_no)
+                              .filter_by(system_id=system_id).all()
             if row[0]
         )
         log_msg(
-            f"  Existing in Maji360: "
-            f"{len(existing_meters)}"
+            f"  Already in Maji360     : {len(existing_meters)}"
         )
 
+        # ── Build meter → account-number map ──────────────
+        meter_code_map  = sys_cfg["meter_code_map"]   # code → meter_no
         meter_to_account = {}
-        if cfg.get("accounts_key") and \
-           cfg.get("accounts_base"):
+
+        if cfg.get("accounts_key") and cfg.get("accounts_base"):
             try:
                 r2 = requests.get(
-                    f"{cfg['accounts_base']}"
-                    f"/customer_accounts",
-                    params={
-                        "client": cfg["accounts_key"],
-                        "limit":  50
-                    },
-                    timeout=15
+                    f"{cfg['accounts_base']}/customer_accounts",
+                    params={"client": cfg["accounts_key"], "limit": 50},
+                    timeout=15,
                 )
                 r3 = requests.get(
                     f"{cfg['accounts_base']}/customers",
-                    params={
-                        "client": cfg["accounts_key"],
-                        "limit":  50
-                    },
-                    timeout=15
+                    params={"client": cfg["accounts_key"], "limit": 50},
+                    timeout=15,
                 )
-                if r2.status_code == 200 and \
-                   r3.status_code == 200:
+                if r2.status_code == 200 and r3.status_code == 200:
                     mw_customers = {
                         c["_id"]: c.get("code", "")
                         for c in r3.json()
                     }
                     for ca in r2.json():
-                        cust_id  = ca.get(
-                            "customer", ""
-                        )
-                        kr_code  = mw_customers.get(
-                            cust_id, ""
-                        )
+                        cust_id  = ca.get("customer", "")
+                        kr_code  = mw_customers.get(cust_id, "")
                         acc_code = ca.get("code", "")
-                        meter_no = KR_TO_METER.get(
-                            kr_code, ""
-                        )
+                        meter_no = meter_code_map.get(kr_code, "")
                         if meter_no and acc_code:
-                            meter_to_account[
-                                meter_no
-                            ] = acc_code
+                            meter_to_account[meter_no] = acc_code
             except Exception as e:
-                log_msg(
-                    f"  Accounts lookup error: {e}"
-                )
+                log_msg(f"  Accounts lookup error: {e}")
 
         new_count = 0
-        for wp in all_wps:
+        for wp in wps_for_system:
             code = str(wp.get("code", ""))
             if not code or code in existing_meters:
                 continue
 
-            if wp.get("water_system") != \
-               WATER_SYSTEM_ID:
-                continue
-
-            name = wp.get(
-                "name", f"Customer {code}"
-            )
+            name = wp.get("name", f"Customer {code}")
             if isinstance(name, dict):
                 name = name.get("en", str(name))
 
-            coords    = wp.get(
-                "location", {}
-            ).get("coordinates", [])
-            lon       = coords[0] \
-                        if len(coords) > 0 else None
-            lat       = coords[1] \
-                        if len(coords) > 1 else None
-            desc      = wp.get("desc", "")
+            coords = (
+                wp.get("location", {})
+                  .get("coordinates", [])
+            )
+            lon = coords[0] if len(coords) > 0 else None
+            lat = coords[1] if len(coords) > 1 else None
+            desc       = wp.get("desc", "")
             account_no = meter_to_account.get(
-                code, f"KAR-{code}"
+                code, f"{system_name[:3].upper()}-{code}"
             )
 
             session.add(Customer(
@@ -531,13 +698,13 @@ def sync_customers(system_id: int,
                 address    = desc,
                 latitude   = lat,
                 longitude  = lon,
-                is_active  = True
+                is_active  = True,
             ))
             existing_meters.add(code)
             new_count += 1
             log_msg(
-                f"  ✓ New customer: {name} "
-                f"(meter={code} acc={account_no})"
+                f"  ✓ {name} "
+                f"(meter={code}, acc={account_no})"
             )
 
         session.commit()
@@ -548,76 +715,50 @@ def sync_customers(system_id: int,
         return 0
 
 
-def sync_billing(system_id: int,
-                  session,
-                  cfg: dict,
-                  log: list) -> int:
+# ─────────────────────────────────────────────────────────────
+# sync_billing
+# ─────────────────────────────────────────────────────────────
+
+def sync_billing(
+    system_id: int,
+    session,
+    cfg:       dict,
+    sys_cfg:   dict,   # ← new
+    log:       list,
+) -> int:
+
     def log_msg(msg):
         if log is not None:
             log.append(msg)
 
-    if not cfg.get("accounts_key") or \
-       not cfg.get("accounts_base"):
-        log_msg(
-            "  Accounts API not configured — skipping"
-        )
+    if not cfg.get("accounts_key") or not cfg.get("accounts_base"):
+        log_msg("  Accounts API not configured — skipping")
         return 0
 
+    meter_code_map = sys_cfg["meter_code_map"]
+
     try:
-        all_txns = []
-        skip     = 0
-        while True:
-            r = requests.get(
-                f"{cfg['accounts_base']}/transactions",
-                params={
-                    "client": cfg["accounts_key"],
-                    "limit":  50,
-                    "skip":   skip
-                },
-                timeout=30
-            )
-            if r.status_code != 200 or \
-               not r.text.strip():
-                break
-            batch = r.json()
-            if not batch:
-                break
-            all_txns.extend(batch)
-            if len(batch) < 50:
-                break
-            skip += 50
+        all_txns = _fetch_all_transactions(
+            cfg["accounts_base"], cfg["accounts_key"]
+        )
 
         r2 = requests.get(
             f"{cfg['accounts_base']}/customer_accounts",
-            params={
-                "client": cfg["accounts_key"],
-                "limit":  50
-            },
-            timeout=15
+            params={"client": cfg["accounts_key"], "limit": 50},
+            timeout=15,
         )
         r3 = requests.get(
             f"{cfg['accounts_base']}/customers",
-            params={
-                "client": cfg["accounts_key"],
-                "limit":  50
-            },
-            timeout=15
+            params={"client": cfg["accounts_key"], "limit": 50},
+            timeout=15,
         )
         mw_customers = {
             c["_id"]: c.get("code")
-            for c in (
-                r3.json()
-                if r3.status_code == 200 else []
-            )
+            for c in (r3.json() if r3.status_code == 200 else [])
         }
         acc_to_kr = {
-            ca["_id"]: mw_customers.get(
-                ca.get("customer", ""), ""
-            )
-            for ca in (
-                r2.json()
-                if r2.status_code == 200 else []
-            )
+            ca["_id"]: mw_customers.get(ca.get("customer", ""), "")
+            for ca in (r2.json() if r2.status_code == 200 else [])
         }
 
         billing_txns = [
@@ -630,49 +771,38 @@ def sync_billing(system_id: int,
             and t.get("customer_account")
         ]
 
-        cust_paid = defaultdict(float)
+        # Build total-paid-per-meter for payment allocation
+        cust_paid: dict[str, float] = defaultdict(float)
         for t in payment_txns:
             acc     = t.get("customer_account", "")
             kr_code = acc_to_kr.get(acc, "")
-            meter   = KR_TO_METER.get(kr_code, "")
+            meter   = meter_code_map.get(kr_code, "")
             if meter:
                 cust_paid[meter] += t.get("amount", 0)
 
         new_bills = 0
         for t in billing_txns:
-            cust_acc_id = t.get(
-                "customer_account", ""
-            )
-            kr_code  = acc_to_kr.get(
-                cust_acc_id, ""
-            )
-            meter_no = KR_TO_METER.get(kr_code)
-
+            cust_acc_id = t.get("customer_account", "")
+            kr_code  = acc_to_kr.get(cust_acc_id, "")
+            meter_no = meter_code_map.get(kr_code)
             if not meter_no:
                 continue
 
-            customer = session.query(
-                Customer
-            ).filter_by(
-                system_id=system_id,
-                meter_no=meter_no
+            customer = session.query(Customer).filter_by(
+                system_id=system_id, meter_no=meter_no
             ).first()
-
             if not customer:
                 continue
 
             date_str   = t.get("date", "")
-            bill_month = date_str[:7] \
-                         if date_str else ""
-            units_m3   = float(
-                t.get("meter_volume", 0)
-            )
+            bill_month = date_str[:7] if date_str else ""
+            units_m3   = float(t.get("meter_volume", 0))
             amount     = float(t.get("amount", 0))
 
             existing = session.query(Bill).filter_by(
                 system_id   = system_id,
                 customer_id = customer.id,
-                bill_month  = bill_month
+                bill_month  = bill_month,
             ).first()
 
             if not existing:
@@ -684,65 +814,46 @@ def sync_billing(system_id: int,
                     amount      = amount,
                     amount_paid = 0.0,
                     is_paid     = False,
-                    sms_sent    = False
+                    sms_sent    = False,
                 ))
                 new_bills += 1
 
         session.commit()
         log_msg(f"  New bills added: {new_bills}")
 
-        log_msg(
-            "  Recalculating payments for "
-            "all customers..."
-        )
-
-        updated_payments = 0
+        # ── Allocate payments across bills ─────────────────
+        log_msg("  Recalculating payment allocation...")
+        updated = 0
         for meter_no, total_paid in cust_paid.items():
-            customer = session.query(
-                Customer
-            ).filter_by(
-                system_id=system_id,
-                meter_no=meter_no
+            customer = session.query(Customer).filter_by(
+                system_id=system_id, meter_no=meter_no
             ).first()
-
             if not customer:
                 continue
-
             cust_bills = session.query(Bill).filter_by(
-                system_id   = system_id,
-                customer_id = customer.id
+                system_id=system_id, customer_id=customer.id
             ).order_by(Bill.bill_month).all()
-
-            if not cust_bills:
-                continue
 
             remaining = total_paid
             for bill in cust_bills:
                 bill_amount = bill.amount or 0
                 if remaining >= bill_amount:
-                    new_paid    = bill_amount
-                    new_is_paid = True
-                    remaining  -= bill_amount
+                    new_paid, new_paid_flag = bill_amount, True
+                    remaining -= bill_amount
                 elif remaining > 0:
-                    new_paid    = remaining
-                    new_is_paid = False
-                    remaining   = 0
+                    new_paid, new_paid_flag = remaining, False
+                    remaining = 0
                 else:
-                    new_paid    = 0
-                    new_is_paid = False
+                    new_paid, new_paid_flag = 0.0, False
 
-                if bill.amount_paid != new_paid or \
-                   bill.is_paid != new_is_paid:
+                if bill.amount_paid != new_paid \
+                   or bill.is_paid != new_paid_flag:
                     bill.amount_paid = new_paid
-                    bill.is_paid     = new_is_paid
-                    updated_payments += 1
+                    bill.is_paid     = new_paid_flag
+                    updated += 1
 
         session.commit()
-        log_msg(
-            f"  Payment records updated: "
-            f"{updated_payments}"
-        )
-
+        log_msg(f"  Payment records updated: {updated}")
         return new_bills
 
     except Exception as e:
@@ -750,73 +861,49 @@ def sync_billing(system_id: int,
         return 0
 
 
-def sync_payments(system_id: int,
-                   session,
-                   cfg: dict,
-                   log: list) -> int:
+# ─────────────────────────────────────────────────────────────
+# sync_payments
+# ─────────────────────────────────────────────────────────────
+
+def sync_payments(
+    system_id: int,
+    session,
+    cfg:       dict,
+    sys_cfg:   dict,   # ← new
+    log:       list,
+) -> int:
+
     def log_msg(msg):
         if log is not None:
             log.append(msg)
 
-    if not cfg.get("accounts_key") or \
-       not cfg.get("accounts_base"):
+    if not cfg.get("accounts_key") or not cfg.get("accounts_base"):
         return 0
 
+    meter_code_map = sys_cfg["meter_code_map"]
+
     try:
-        all_txns = []
-        skip     = 0
-        while True:
-            r = requests.get(
-                f"{cfg['accounts_base']}/transactions",
-                params={
-                    "client": cfg["accounts_key"],
-                    "limit":  50,
-                    "skip":   skip
-                },
-                timeout=30
-            )
-            if r.status_code != 200 or \
-               not r.text.strip():
-                break
-            batch = r.json()
-            if not batch:
-                break
-            all_txns.extend(batch)
-            if len(batch) < 50:
-                break
-            skip += 50
+        all_txns = _fetch_all_transactions(
+            cfg["accounts_base"], cfg["accounts_key"]
+        )
 
         r2 = requests.get(
             f"{cfg['accounts_base']}/customer_accounts",
-            params={
-                "client": cfg["accounts_key"],
-                "limit":  50
-            },
-            timeout=15
+            params={"client": cfg["accounts_key"], "limit": 50},
+            timeout=15,
         )
         r3 = requests.get(
             f"{cfg['accounts_base']}/customers",
-            params={
-                "client": cfg["accounts_key"],
-                "limit":  50
-            },
-            timeout=15
+            params={"client": cfg["accounts_key"], "limit": 50},
+            timeout=15,
         )
         mw_customers = {
             c["_id"]: c.get("code")
-            for c in (
-                r3.json()
-                if r3.status_code == 200 else []
-            )
+            for c in (r3.json() if r3.status_code == 200 else [])
         }
         acc_to_kr = {
-            ca["_id"]: mw_customers.get(
-                ca.get("customer", ""), ""
-            )
-            for ca in (
-                r2.json()
-                if r2.status_code == 200 else []
-            )
+            ca["_id"]: mw_customers.get(ca.get("customer", ""), "")
+            for ca in (r2.json() if r2.status_code == 200 else [])
         }
 
         payment_txns = [
@@ -825,8 +912,7 @@ def sync_payments(system_id: int,
             and t.get("customer_account")
         ]
 
-        from sqlalchemy import text as sql_text
-        existing_payments = set()
+        existing_payments: set[tuple] = set()
         try:
             result = session.execute(sql_text(
                 "SELECT customer_id, amount, "
@@ -834,8 +920,7 @@ def sync_payments(system_id: int,
                 "WHERE system_id = :sid"
             ), {"sid": system_id})
             existing_payments = {
-                (row[0], float(row[1]),
-                 str(row[2])[:10])
+                (row[0], float(row[1]), str(row[2])[:10])
                 for row in result
             }
         except Exception:
@@ -845,15 +930,12 @@ def sync_payments(system_id: int,
         for t in payment_txns:
             acc     = t.get("customer_account", "")
             kr_code = acc_to_kr.get(acc, "")
-            meter   = KR_TO_METER.get(kr_code, "")
+            meter   = meter_code_map.get(kr_code, "")
             if not meter:
                 continue
 
-            customer = session.query(
-                Customer
-            ).filter_by(
-                system_id=system_id,
-                meter_no=meter
+            customer = session.query(Customer).filter_by(
+                system_id=system_id, meter_no=meter
             ).first()
             if not customer:
                 continue
@@ -865,43 +947,35 @@ def sync_payments(system_id: int,
             if not date_str or amount <= 0:
                 continue
 
-            date_only   = date_str[:10]
-            paid_at_str = f"{date_only}T00:00:00"
-
-            key = (customer.id, amount, date_only)
+            date_only = date_str[:10]
+            key       = (customer.id, amount, date_only)
             if key in existing_payments:
                 continue
 
             try:
                 session.execute(sql_text("""
                     INSERT INTO payments
-                        (system_id, customer_id,
-                         amount, payment_method,
-                         notes, paid_at, status)
+                        (system_id, customer_id, amount,
+                         payment_method, notes, paid_at, status)
                     VALUES
-                        (:system_id, :customer_id,
-                         :amount, :method,
-                         :notes, :paid_at,
-                         'completed')
+                        (:system_id, :customer_id, :amount,
+                         :method, :notes,
+                         :paid_at::timestamptz, 'completed')
                 """), {
                     "system_id":   system_id,
                     "customer_id": customer.id,
                     "amount":      amount,
                     "method":      "Cash",
                     "notes":       notes,
-                    "paid_at":     paid_at_str
+                    "paid_at":     f"{date_only}T00:00:00",
                 })
                 existing_payments.add(key)
                 new_payments += 1
             except Exception as e:
-                log_msg(
-                    f"  Payment insert error: {e}"
-                )
+                log_msg(f"  Payment insert error: {e}")
 
         session.commit()
-        log_msg(
-            f"  New payments synced: {new_payments}"
-        )
+        log_msg(f"  New payments synced: {new_payments}")
         return new_payments
 
     except Exception as e:
@@ -909,74 +983,52 @@ def sync_payments(system_id: int,
         return 0
 
 
-def sync_expenses(system_id: int,
-                   session,
-                   cfg: dict,
-                   log: list) -> int:
+# ─────────────────────────────────────────────────────────────
+# sync_expenses  (no per-system changes needed here yet)
+# ─────────────────────────────────────────────────────────────
+
+def sync_expenses(
+    system_id: int,
+    session,
+    cfg:       dict,
+    log:       list,
+) -> int:
+
     def log_msg(msg):
         if log is not None:
             log.append(msg)
 
-    if not cfg.get("accounts_key") or \
-       not cfg.get("accounts_base"):
-        log_msg(
-            "  Accounts API not configured — skipping"
-        )
+    if not cfg.get("accounts_key") or not cfg.get("accounts_base"):
+        log_msg("  Accounts API not configured — skipping expenses")
         return 0
 
     CASH_ACCOUNT  = "302bafeccb9d4cb0ae442cffb833a64c"
     ACCOUNT_NAMES = {
-        "998ebd77689a4bd388af840c4ca860b4":
-            "Office Expenses",
-        "eca51b9feeab4cb79c77c9445585044d":
-            "Operating Expenses",
-        "11fe4eb898c749fe9e1dadae10933f30":
-            "Salaries and Wages",
+        "998ebd77689a4bd388af840c4ca860b4": "Office Expenses",
+        "eca51b9feeab4cb79c77c9445585044d": "Operating Expenses",
+        "11fe4eb898c749fe9e1dadae10933f30": "Salaries and Wages",
     }
 
     try:
-        all_txns = []
-        skip     = 0
-        while True:
-            r = requests.get(
-                f"{cfg['accounts_base']}/transactions",
-                params={
-                    "client": cfg["accounts_key"],
-                    "limit":  50,
-                    "skip":   skip
-                },
-                timeout=30
-            )
-            if r.status_code != 200 or \
-               not r.text.strip():
-                break
-            batch = r.json()
-            if not batch:
-                break
-            all_txns.extend(batch)
-            if len(batch) < 50:
-                break
-            skip += 50
-
+        all_txns = _fetch_all_transactions(
+            cfg["accounts_base"], cfg["accounts_key"]
+        )
         expense_txns = [
             t for t in all_txns
             if t.get("from_account") == CASH_ACCOUNT
             and not t.get("customer_account")
             and not t.get("meter_volume")
         ]
-
         log_msg(
-            f"  Expense transactions found: "
-            f"{len(expense_txns)}"
+            f"  Expense transactions: {len(expense_txns)}"
         )
 
-        from sqlalchemy import text as sql_text
-        existing = set()
+        existing: set[str] = set()
         try:
             result = session.execute(sql_text(
                 "SELECT mwater_id FROM expenses "
                 "WHERE system_id = :sid "
-                "AND mwater_id IS NOT NULL"
+                "  AND mwater_id IS NOT NULL"
             ), {"sid": system_id})
             existing = {row[0] for row in result}
         except Exception:
@@ -987,48 +1039,35 @@ def sync_expenses(system_id: int,
             mwater_id = t.get("_id", "")
             if mwater_id in existing:
                 continue
-
             to_acc   = t.get("to_account", "")
-            category = ACCOUNT_NAMES.get(
-                to_acc, "Other"
-            )
+            category = ACCOUNT_NAMES.get(to_acc, "Other")
             date_str = t.get("date", "")
-            month    = date_str[:7] \
-                       if date_str else ""
-
+            month    = date_str[:7] if date_str else ""
             try:
                 session.execute(sql_text("""
                     INSERT INTO expenses
-                        (system_id, date, month,
-                         amount, category,
-                         notes, mwater_id)
+                        (system_id, date, month, amount,
+                         category, notes, mwater_id)
                     VALUES
-                        (:system_id, :date, :month,
-                         :amount, :category,
-                         :notes, :mwater_id)
+                        (:system_id, :date, :month, :amount,
+                         :category, :notes, :mwater_id)
                     ON CONFLICT (mwater_id) DO NOTHING
                 """), {
                     "system_id": system_id,
                     "date":      date_str,
                     "month":     month,
-                    "amount":    float(
-                        t.get("amount", 0)
-                    ),
+                    "amount":    float(t.get("amount", 0)),
                     "category":  category,
                     "notes":     t.get("notes", ""),
-                    "mwater_id": mwater_id
+                    "mwater_id": mwater_id,
                 })
                 new_expenses += 1
                 existing.add(mwater_id)
             except Exception as e:
-                log_msg(
-                    f"  Expense insert error: {e}"
-                )
+                log_msg(f"  Expense insert error: {e}")
 
         session.commit()
-        log_msg(
-            f"  New expenses synced: {new_expenses}"
-        )
+        log_msg(f"  New expenses: {new_expenses}")
         return new_expenses
 
     except Exception as e:
@@ -1036,25 +1075,24 @@ def sync_expenses(system_id: int,
         return 0
 
 
-def recalculate_nrw(system_id: int,
-                     session) -> None:
+# ─────────────────────────────────────────────────────────────
+# recalculate_nrw  (unchanged logic, kept here for completeness)
+# ─────────────────────────────────────────────────────────────
+
+def recalculate_nrw(system_id: int, session) -> None:
     readings = session.query(DailyReading).filter_by(
         system_id=system_id
     ).all()
 
-    monthly = defaultdict(
+    monthly: dict[str, dict] = defaultdict(
         lambda: {"pumped": 0.0, "consumed": 0.0}
     )
     for r in readings:
         month = r.reading_date.strftime("%Y-%m")
-        if r.water_produced_m3 and \
-           r.water_produced_m3 > 0:
-            monthly[month]["pumped"] += \
-                r.water_produced_m3
-        if r.water_consumed_m3 and \
-           r.water_consumed_m3 > 0:
-            monthly[month]["consumed"] += \
-                r.water_consumed_m3
+        if r.water_produced_m3 and r.water_produced_m3 > 0:
+            monthly[month]["pumped"]   += r.water_produced_m3
+        if r.water_consumed_m3 and r.water_consumed_m3 > 0:
+            monthly[month]["consumed"] += r.water_consumed_m3
 
     for month, data in monthly.items():
         pumped   = round(data["pumped"],   2)
@@ -1062,7 +1100,7 @@ def recalculate_nrw(system_id: int,
         nrw_m3   = round(pumped - consumed, 2)
         nrw_pct  = round(
             (nrw_m3 / pumped) * 100, 1
-        ) if pumped > 0 else 0
+        ) if pumped > 0 else 0.0
 
         existing = session.query(NRWRecord).filter_by(
             system_id=system_id, month=month
@@ -1080,7 +1118,39 @@ def recalculate_nrw(system_id: int,
                 water_produced = pumped,
                 water_billed   = consumed,
                 nrw_m3         = nrw_m3,
-                nrw_percent    = nrw_pct
+                nrw_percent    = nrw_pct,
             ))
 
     session.commit()
+
+
+# ─────────────────────────────────────────────────────────────
+# Private helper: paginated transaction fetch
+# (de-duplicates the identical loop in billing/payments/expenses)
+# ─────────────────────────────────────────────────────────────
+
+def _fetch_all_transactions(
+    accounts_base: str, accounts_key: str
+) -> list[dict]:
+    all_txns: list[dict] = []
+    skip = 0
+    while True:
+        r = requests.get(
+            f"{accounts_base}/transactions",
+            params={
+                "client": accounts_key,
+                "limit":  50,
+                "skip":   skip,
+            },
+            timeout=30,
+        )
+        if r.status_code != 200 or not r.text.strip():
+            break
+        batch = r.json()
+        if not batch:
+            break
+        all_txns.extend(batch)
+        if len(batch) < 50:
+            break
+        skip += 50
+    return all_txns
