@@ -1126,14 +1126,14 @@ def sync_payments(
                     VALUES
                         (:system_id, :customer_id, :amount,
                          :method, :notes,
-                         :paid_at::timestamptz, 'completed')
+                         :paid_at, 'completed')
                 """), {
                     "system_id":   system_id,
                     "customer_id": customer.id,
                     "amount":      amount,
                     "method":      "Cash",
                     "notes":       notes,
-                    "paid_at":     f"{date_only}T00:00:00",
+                    "paid_at":     f"{date_only}T00:00:00+00:00",
                 })
                 existing_payments.add(key)
                 new_payments += 1
