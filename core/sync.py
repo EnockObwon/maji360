@@ -21,8 +21,8 @@ from core.database import (
     Bill, Customer, NRWRecord,
 )
 
-# Try importing SyncLog; graceful fallback if migration not ─
-# yet applied (scheduler will still work, just no log rows) ─
+# ── Try importing SyncLog; graceful fallback if migration not ─
+# ── yet applied (scheduler will still work, just no log rows) ─
 try:
     from core.database import SyncLog
     _SYNCLOG_AVAILABLE = True
@@ -414,7 +414,7 @@ def sync_system(
 
         all_responses.sort(key=_submitted_dt)
 
-        # Existing response IDs (skip duplicates) 
+        # Existing response IDs (skip duplicates)
         # Check GLOBALLY across all systems, not just the
         # current one. When two systems share the same form,
         # each response belongs to exactly one system.
@@ -437,7 +437,7 @@ def sync_system(
         log_msg(f"Last pump end   : {last_pump_end}")
         log_msg(f"Last tank end   : {last_tank_end}")
 
-        # Field IDs for this system
+        # Field IDs for this system 
         fids     = sys_cfg["field_ids"]
         pump_end_fid = fids.get(
             "pump_end", _DEFAULT_FIELD_IDS["pump_end"]
@@ -546,21 +546,21 @@ def sync_system(
         )
         log_msg(f"New bills         : {new_bills}")
 
-        # Payments
+        # Payments 
         log_msg("Syncing payments...")
         new_payments = sync_payments(
             system_id, session, cfg, sys_cfg, log
         )
         log_msg(f"New payments      : {new_payments}")
 
-        # Expenses 
+        # Expenses
         log_msg("Syncing expenses...")
         new_expenses = sync_expenses(
             system_id, session, cfg, log
         )
         log_msg(f"New expenses      : {new_expenses}")
 
-        # NRW recalculation 
+        # NRW recalculation
         log_msg("Recalculating NRW...")
         recalculate_nrw(system_id, session)
 
@@ -636,7 +636,7 @@ def sync_customers(
     water_system_id = sys_cfg["water_system_id"]
 
     try:
-        # Fetch water points for this group 
+        # Fetch water points for this group
         all_wps = []
         skip    = 0
         while True:
@@ -794,7 +794,7 @@ def sync_customers(
 
         session.commit()
 
-        # Accounts API customer sync 
+        # Accounts API customer sync
         # Used when meter_code_map is empty (e.g. NYAKABALE).
         # Pulls customers directly from the mWater accounts
         # system using their numeric IDs (10001, 10002...).
@@ -1035,7 +1035,7 @@ def sync_billing(
         session.commit()
         log_msg(f"  New bills added: {new_bills}")
 
-        # Allocate payments across bills
+        # Allocate payments across bills 
         # Uses the payments TABLE (all sources: mWater-synced
         # AND manually recorded in the app). This prevents
         # manual payments being overwritten on the next sync.
