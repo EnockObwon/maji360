@@ -60,37 +60,68 @@ def show():
         st.info("No billing data available yet.")
         return
 
-    # Period selector
-    bill_months   = sorted(
-        {b.bill_month for b in all_bills if b.bill_month},
+    # Period selector — year then month 
+    available_years = sorted(
+        {b.bill_month[:4] for b in all_bills if b.bill_month},
         reverse=True
     )
-    period_opts   = ["All time"] + bill_months
-    col_p1, col_p2 = st.columns([2, 5])
+    year_options = ["All time"] + available_years
+
+    col_p1, col_p2, col_p3 = st.columns([2, 2, 3])
     with col_p1:
-        sel_period = st.selectbox(
-            "Period",
-            options = period_opts,
+        sel_year = st.selectbox(
+            "Year",
+            options = year_options,
             index   = 0,
-            key     = "billing_period",
-            help    = "Filter all metrics and charts by billing month"
+            key     = "billing_year"
         )
+
+    with col_p2:
+        month_names = {
+            "01": "January",  "02": "February",
+            "03": "March",    "04": "April",
+            "05": "May",      "06": "June",
+            "07": "July",     "08": "August",
+            "09": "September","10": "October",
+            "11": "November", "12": "December",
+        }
+        if sel_year == "All time":
+            st.selectbox("Month", ["—"], key="billing_month", disabled=True)
+            sel_period   = "All time"
+            period_label = "All time"
+        else:
+            year_months = sorted(
+                {b.bill_month[5:7]
+                 for b in all_bills
+                 if b.bill_month and b.bill_month[:4] == sel_year},
+                reverse=True
+            )
+            month_opts = ["All months"] + [
+                month_names[m] for m in year_months
+            ]
+            sel_month = st.selectbox(
+                "Month", options=month_opts,
+                index=0, key="billing_month"
+            )
+            if sel_month == "All months":
+                sel_period   = sel_year
+                period_label = sel_year
+            else:
+                month_num    = {v: k for k, v in month_names.items()}.get(sel_month, "")
+                sel_period   = f"{sel_year}-{month_num}"
+                period_label = f"{sel_month} {sel_year}"
 
     if sel_period == "All time":
         period_bills = all_bills
-        try:
-            period_label = "All time"
-        except Exception:
-            period_label = "All time"
+    elif len(sel_period) == 4:
+        period_bills = [
+            b for b in all_bills
+            if b.bill_month and b.bill_month.startswith(sel_period)
+        ]
     else:
         period_bills = [b for b in all_bills if b.bill_month == sel_period]
-        try:
-            from datetime import datetime as _dt
-            period_label = _dt.strptime(sel_period, "%Y-%m").strftime("%B %Y")
-        except Exception:
-            period_label = sel_period
 
-    # KPI totals — filtered by period
+    # KPI totals — filtered by period 
     total_billed      = sum(b.amount      or 0 for b in period_bills)
     total_paid        = sum(b.amount_paid or 0 for b in period_bills)
     total_outstanding = total_billed - total_paid
@@ -114,7 +145,7 @@ def show():
     )
     st.divider()
 
-    # Monthly aggregates 
+    # Monthly aggregates
     # Both billed and collected are grouped by bill_month
     # so they always align to the same billing period.
     # Using payment dates would misalign when payments are
@@ -141,7 +172,7 @@ def show():
         for b, c in zip(billed_vals, collected_vals)
     ]
 
-    # Chart 1: Cash collected by month 
+    # Chart 1: Cash collected by month
     st.markdown("### Cash collected by month")
     st.caption(
         "Green = collected against that month's bills · "
@@ -182,7 +213,7 @@ def show():
 
     st.divider()
 
-    # Chart 2: Customer consumption by month 
+    # Chart 2: Customer consumption by month
     st.markdown("### Customer consumption by month (m³)")
     st.caption("Grouped bars — each colour is one customer")
 
@@ -271,7 +302,7 @@ def show():
 
     st.divider()
 
-    # Customer account balances table
+    # Customer account balances table 
     st.markdown("### Customer account balances")
     rows = []
     for cid, info in cust_bill_map.items():
