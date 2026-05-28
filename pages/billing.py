@@ -11,9 +11,7 @@ def show():
     require_login()
 
     system_id   = st.session_state.get("selected_system_id")
-    system_name = st.session_state.get(
-        "selected_system_name", ""
-    )
+    system_name = st.session_state.get("selected_system_name", "")
     currency    = st.session_state.get("currency", "UGX")
 
     if not system_id:
@@ -28,7 +26,7 @@ def show():
     )
     st.divider()
 
-    # ── Fetch all data in one session ──────────────────
+    # ── Fetch all data ─────────────────────────────────
     session   = get_session()
     customers = session.query(Customer).filter_by(
         system_id=system_id, is_active=True
@@ -36,19 +34,6 @@ def show():
     all_bills = session.query(Bill).filter_by(
         system_id=system_id
     ).all()
-
-    # Fetch payments using raw SQL to avoid ORM issues
-    try:
-        payment_rows = session.execute(sql_text(
-            "SELECT amount, paid_at FROM payments "
-            "WHERE system_id = :sid"
-        ), {"sid": system_id}).fetchall()
-        all_payments = [
-            {"amount": row[0], "paid_at": row[1]}
-            for row in payment_rows
-        ]
-    except Exception:
-        all_payments = []
 
     # Build customer bill map while session is open
     cust_bill_map = {}
@@ -63,8 +48,8 @@ def show():
             "name":       c.name,
             "bills": [{
                 "bill_month":  b.bill_month,
-                "units_m3":    b.units_m3 or 0,
-                "amount":      b.amount or 0,
+                "units_m3":    b.units_m3    or 0,
+                "amount":      b.amount      or 0,
                 "amount_paid": b.amount_paid or 0,
                 "is_paid":     b.is_paid
             } for b in c_bills]
@@ -76,12 +61,8 @@ def show():
         return
 
     # ── KPI totals ─────────────────────────────────────
-    total_billed      = sum(
-        b.amount or 0 for b in all_bills
-    )
-    total_paid        = sum(
-        b.amount_paid or 0 for b in all_bills
-    )
+    total_billed      = sum(b.amount      or 0 for b in all_bills)
+    total_paid        = sum(b.amount_paid or 0 for b in all_bills)
     total_outstanding = total_billed - total_paid
     coll_rate         = round(
         (total_paid / total_billed) * 100, 1
@@ -89,85 +70,45 @@ def show():
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric(
-            "Total billed",
-            f"{currency} {total_billed:,.0f}"
-        )
+        st.metric("Total billed",      f"{currency} {total_billed:,.0f}")
     with c2:
-        st.metric(
-            "Total collected",
-            f"{currency} {total_paid:,.0f}"
-        )
+        st.metric("Total collected",   f"{currency} {total_paid:,.0f}")
     with c3:
-        st.metric(
-            "Outstanding",
-            f"{currency} {total_outstanding:,.0f}"
-        )
+        st.metric("Outstanding",       f"{currency} {total_outstanding:,.0f}")
     with c4:
-        st.metric(
-            "Collection rate", f"{coll_rate}%"
-        )
+        st.metric("Collection rate",   f"{coll_rate}%")
 
     st.divider()
 
-    # ── Monthly billed by bill month ───────────────────
-    monthly_billed = defaultdict(float)
+    # ── Monthly aggregates ─────────────────────────────
+    # Both billed and collected are grouped by bill_month
+    # so they always align to the same billing period.
+    # Using payment dates would misalign when payments are
+    # recorded in a different month than the bill (e.g.
+    # opening balance imports or late payments).
+    monthly_billed    = defaultdict(float)
+    monthly_collected = defaultdict(float)
+
     for b in all_bills:
         if b.bill_month:
-            monthly_billed[b.bill_month] += \
-                b.amount or 0
+            monthly_billed[b.bill_month]    += b.amount      or 0
+            monthly_collected[b.bill_month] += b.amount_paid or 0
 
-    # ── Monthly collected by payment month ─────────────
-    # Cash flow view — when money actually came in
-    monthly_collected = defaultdict(float)
-    if all_payments:
-        for p in all_payments:
-            paid_at = p.get("paid_at")
-            if paid_at:
-                try:
-                    if hasattr(paid_at, 'strftime'):
-                        month = paid_at.strftime("%Y-%m")
-                    else:
-                        month = str(paid_at)[:7]
-                    monthly_collected[month] += \
-                        p.get("amount") or 0
-                except Exception:
-                    pass
-    else:
-        # Fallback to bill month if no payments table
-        for b in all_bills:
-            if b.bill_month:
-                monthly_collected[b.bill_month] += \
-                    b.amount_paid or 0
-
-    # Combine all months from both sources
-    all_months = sorted(set(
-        list(monthly_billed.keys()) +
-        list(monthly_collected.keys())
-    ))
-
-    billed_vals    = [
-        monthly_billed.get(m, 0) for m in all_months
-    ]
-    collected_vals = [
-        monthly_collected.get(m, 0) for m in all_months
-    ]
-    outstanding_vals = [
-        max(0, b - c) for b, c in
-        zip(billed_vals, collected_vals)
-    ]
-    rates = [
-        round((c / b) * 100, 1)
-        if b > 0 else 0
+    all_months       = sorted(monthly_billed.keys())
+    billed_vals      = [monthly_billed.get(m, 0)    for m in all_months]
+    collected_vals   = [monthly_collected.get(m, 0) for m in all_months]
+    outstanding_vals = [max(0, b - c) for b, c in zip(billed_vals, collected_vals)]
+    rates            = [
+        round((c / b) * 100, 1) if b > 0 else 0
         for b, c in zip(billed_vals, collected_vals)
     ]
 
     # ── Chart 1: Cash collected by month ───────────────
     st.markdown("### Cash collected by month")
     st.caption(
-        "Green = cash received that month · "
+        "Green = collected against that month's bills · "
         "Pink = bills issued but not yet paid · "
-        "% = collection rate against bills issued"
+        "% = collection rate"
     )
 
     fig1 = go.Figure()
@@ -192,17 +133,11 @@ def show():
         margin        = dict(t=10, b=10, l=0, r=0),
         plot_bgcolor  = "white",
         paper_bgcolor = "white",
-        yaxis         = dict(
-            title     = f"Amount ({currency})",
-            gridcolor = "#f1f5f9"
-        ),
-        xaxis  = dict(gridcolor="#f1f5f9"),
-        legend = dict(
-            orientation = "h",
-            yanchor     = "bottom",
-            y           = 1.02,
-            xanchor     = "left",
-            x           = 0
+        yaxis         = dict(title=f"Amount ({currency})", gridcolor="#f1f5f9"),
+        xaxis         = dict(gridcolor="#f1f5f9"),
+        legend        = dict(
+            orientation="h", yanchor="bottom",
+            y=1.02, xanchor="left", x=0
         )
     )
     st.plotly_chart(fig1, use_container_width=True)
@@ -210,34 +145,23 @@ def show():
     st.divider()
 
     # ── Chart 2: Customer consumption by month ─────────
-    st.markdown(
-        "### Customer consumption by month (m³)"
-    )
-    st.caption(
-        "Grouped bars — each colour is one customer"
-    )
+    st.markdown("### Customer consumption by month (m³)")
+    st.caption("Grouped bars — each colour is one customer")
 
-    colours = [
+    colours    = [
         "#3b82f6", "#22c55e", "#f59e0b", "#ef4444",
         "#8b5cf6", "#06b6d4", "#f97316", "#ec4899",
         "#84cc16", "#14b8a6"
     ]
-
     bill_months = sorted(monthly_billed.keys())
 
     fig2 = go.Figure()
-    for i, (cid, info) in enumerate(
-        cust_bill_map.items()
-    ):
+    for i, (cid, info) in enumerate(cust_bill_map.items()):
         monthly_cons = defaultdict(float)
         for b in info["bills"]:
             if b["bill_month"] and b["units_m3"]:
-                monthly_cons[b["bill_month"]] += \
-                    b["units_m3"]
-        y_vals = [
-            monthly_cons.get(m, 0)
-            for m in bill_months
-        ]
+                monthly_cons[b["bill_month"]] += b["units_m3"]
+        y_vals = [monthly_cons.get(m, 0) for m in bill_months]
         fig2.add_trace(go.Bar(
             name         = info["name"],
             x            = bill_months,
@@ -251,18 +175,12 @@ def show():
         margin        = dict(t=10, b=10, l=0, r=0),
         plot_bgcolor  = "white",
         paper_bgcolor = "white",
-        yaxis         = dict(
-            title     = "Consumption (m³)",
-            gridcolor = "#f1f5f9"
-        ),
-        xaxis  = dict(gridcolor="#f1f5f9"),
-        legend = dict(
-            orientation = "h",
-            yanchor     = "bottom",
-            y           = 1.02,
-            xanchor     = "left",
-            x           = 0,
-            font        = dict(size=10)
+        yaxis         = dict(title="Consumption (m³)", gridcolor="#f1f5f9"),
+        xaxis         = dict(gridcolor="#f1f5f9"),
+        legend        = dict(
+            orientation="h", yanchor="bottom",
+            y=1.02, xanchor="left", x=0,
+            font=dict(size=10)
         )
     )
     st.plotly_chart(fig2, use_container_width=True)
@@ -272,8 +190,7 @@ def show():
     # ── Chart 3: Monthly revenue trend ─────────────────
     st.markdown("### Monthly revenue trend")
     st.caption(
-        "Blue = bills issued · "
-        "Green = cash actually received that month"
+        "Blue = bills issued · Green = collected against those bills"
     )
 
     fig3 = go.Figure()
@@ -302,22 +219,14 @@ def show():
         margin        = dict(t=10, b=10, l=0, r=0),
         plot_bgcolor  = "white",
         paper_bgcolor = "white",
-        yaxis         = dict(
-            title     = f"Amount ({currency})",
-            gridcolor = "#f1f5f9"
-        ),
-        xaxis  = dict(
-            gridcolor = "#f1f5f9",
-            tickmode  = "array",
-            tickvals  = all_months,
-            ticktext  = all_months
+        yaxis         = dict(title=f"Amount ({currency})", gridcolor="#f1f5f9"),
+        xaxis         = dict(
+            gridcolor="#f1f5f9",
+            tickmode="array", tickvals=all_months, ticktext=all_months
         ),
         legend = dict(
-            orientation = "h",
-            yanchor     = "bottom",
-            y           = 1.02,
-            xanchor     = "left",
-            x           = 0
+            orientation="h", yanchor="bottom",
+            y=1.02, xanchor="left", x=0
         )
     )
     st.plotly_chart(fig3, use_container_width=True)
@@ -328,16 +237,10 @@ def show():
     st.markdown("### Customer account balances")
     rows = []
     for cid, info in cust_bill_map.items():
-        billed = sum(
-            b["amount"] for b in info["bills"]
-        )
-        paid   = sum(
-            b["amount_paid"] for b in info["bills"]
-        )
+        billed = sum(b["amount"]      for b in info["bills"])
+        paid   = sum(b["amount_paid"] for b in info["bills"])
         owed   = billed - paid
-        rate   = round(
-            (paid / billed) * 100, 0
-        ) if billed > 0 else 0
+        rate   = round((paid / billed) * 100, 0) if billed > 0 else 0
         rows.append({
             "Account":     info["account_no"],
             "Customer":    info["name"],
@@ -359,15 +262,13 @@ def show():
     # ── Monthly cash flow summary table ────────────────
     st.markdown("### Monthly cash flow summary")
     st.caption(
-        "Cash received each month vs bills issued"
+        "Bills issued each month vs amount collected against those bills"
     )
     flow_rows = []
     for m in all_months:
         billed    = monthly_billed.get(m, 0)
         collected = monthly_collected.get(m, 0)
-        rate      = round(
-            (collected / billed) * 100, 1
-        ) if billed > 0 else 0
+        rate      = round((collected / billed) * 100, 1) if billed > 0 else 0
         flow_rows.append({
             "Month":     m,
             "Billed":    f"{currency} {billed:,.0f}",
