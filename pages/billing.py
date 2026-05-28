@@ -26,7 +26,7 @@ def show():
     )
     st.divider()
 
-    # ── Fetch all data ─────────────────────────────────
+    # Fetch all data 
     session   = get_session()
     customers = session.query(Customer).filter_by(
         system_id=system_id, is_active=True
@@ -60,9 +60,39 @@ def show():
         st.info("No billing data available yet.")
         return
 
-    # ── KPI totals ─────────────────────────────────────
-    total_billed      = sum(b.amount      or 0 for b in all_bills)
-    total_paid        = sum(b.amount_paid or 0 for b in all_bills)
+    # Period selector
+    bill_months   = sorted(
+        {b.bill_month for b in all_bills if b.bill_month},
+        reverse=True
+    )
+    period_opts   = ["All time"] + bill_months
+    col_p1, col_p2 = st.columns([2, 5])
+    with col_p1:
+        sel_period = st.selectbox(
+            "Period",
+            options = period_opts,
+            index   = 0,
+            key     = "billing_period",
+            help    = "Filter all metrics and charts by billing month"
+        )
+
+    if sel_period == "All time":
+        period_bills = all_bills
+        try:
+            period_label = "All time"
+        except Exception:
+            period_label = "All time"
+    else:
+        period_bills = [b for b in all_bills if b.bill_month == sel_period]
+        try:
+            from datetime import datetime as _dt
+            period_label = _dt.strptime(sel_period, "%Y-%m").strftime("%B %Y")
+        except Exception:
+            period_label = sel_period
+
+    # KPI totals — filtered by period
+    total_billed      = sum(b.amount      or 0 for b in period_bills)
+    total_paid        = sum(b.amount_paid or 0 for b in period_bills)
     total_outstanding = total_billed - total_paid
     coll_rate         = round(
         (total_paid / total_billed) * 100, 1
@@ -70,17 +100,21 @@ def show():
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("Total billed",      f"{currency} {total_billed:,.0f}")
+        st.metric("Total billed",    f"{currency} {total_billed:,.0f}")
     with c2:
-        st.metric("Total collected",   f"{currency} {total_paid:,.0f}")
+        st.metric("Total collected", f"{currency} {total_paid:,.0f}")
     with c3:
-        st.metric("Outstanding",       f"{currency} {total_outstanding:,.0f}")
+        st.metric("Outstanding",     f"{currency} {total_outstanding:,.0f}")
     with c4:
-        st.metric("Collection rate",   f"{coll_rate}%")
+        st.metric("Collection rate", f"{coll_rate}%")
 
+    st.caption(
+        f"Showing: **{period_label}** — "
+        f"change the Period dropdown above to filter by month"
+    )
     st.divider()
 
-    # ── Monthly aggregates ─────────────────────────────
+    # Monthly aggregates 
     # Both billed and collected are grouped by bill_month
     # so they always align to the same billing period.
     # Using payment dates would misalign when payments are
@@ -94,7 +128,11 @@ def show():
             monthly_billed[b.bill_month]    += b.amount      or 0
             monthly_collected[b.bill_month] += b.amount_paid or 0
 
-    all_months       = sorted(monthly_billed.keys())
+    # When a specific month is selected, restrict charts to that month
+    if sel_period != "All time":
+        all_months = [sel_period] if sel_period in monthly_billed else []
+    else:
+        all_months = sorted(monthly_billed.keys())
     billed_vals      = [monthly_billed.get(m, 0)    for m in all_months]
     collected_vals   = [monthly_collected.get(m, 0) for m in all_months]
     outstanding_vals = [max(0, b - c) for b, c in zip(billed_vals, collected_vals)]
@@ -103,7 +141,7 @@ def show():
         for b, c in zip(billed_vals, collected_vals)
     ]
 
-    # ── Chart 1: Cash collected by month ───────────────
+    # Chart 1: Cash collected by month 
     st.markdown("### Cash collected by month")
     st.caption(
         "Green = collected against that month's bills · "
@@ -144,7 +182,7 @@ def show():
 
     st.divider()
 
-    # ── Chart 2: Customer consumption by month ─────────
+    # Chart 2: Customer consumption by month 
     st.markdown("### Customer consumption by month (m³)")
     st.caption("Grouped bars — each colour is one customer")
 
@@ -187,7 +225,7 @@ def show():
 
     st.divider()
 
-    # ── Chart 3: Monthly revenue trend ─────────────────
+    # Chart 3: Monthly revenue trend 
     st.markdown("### Monthly revenue trend")
     st.caption(
         "Blue = bills issued · Green = collected against those bills"
@@ -233,7 +271,7 @@ def show():
 
     st.divider()
 
-    # ── Customer account balances table ────────────────
+    # Customer account balances table
     st.markdown("### Customer account balances")
     rows = []
     for cid, info in cust_bill_map.items():
@@ -259,7 +297,7 @@ def show():
 
     st.divider()
 
-    # ── Monthly cash flow summary table ────────────────
+    # Monthly cash flow summary table
     st.markdown("### Monthly cash flow summary")
     st.caption(
         "Bills issued each month vs amount collected against those bills"
