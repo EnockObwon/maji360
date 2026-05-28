@@ -21,8 +21,8 @@ from core.database import (
     Bill, Customer, NRWRecord,
 )
 
-# ── Try importing SyncLog; graceful fallback if migration not ─
-# ── yet applied (scheduler will still work, just no log rows) ─
+# Try importing SyncLog; graceful fallback if migration not ─
+# yet applied (scheduler will still work, just no log rows) ─
 try:
     from core.database import SyncLog
     _SYNCLOG_AVAILABLE = True
@@ -34,6 +34,7 @@ except ImportError:
 # Used ONLY when the corresponding column on water_systems
 # is NULL — i.e., before the migration is run or for legacy
 # data. New systems must have their values set in the DB.
+
 _DEFAULT_GROUP_ID        = "718ce61fbf4f4742bd1018cabf90d1e8"
 _DEFAULT_WATER_SYSTEM_ID = "b0e76a15-7047-4c5e-a986-e2bba550a4ff"
 
@@ -445,7 +446,7 @@ def sync_system(
             "tank_end", _DEFAULT_FIELD_IDS["tank_end"]
         )
 
-        # Parse and save new readings
+        # Parse and save new readings 
         new_pump   = 0
         new_tank   = 0
         duplicates = 0
@@ -530,7 +531,7 @@ def sync_system(
         log_msg(f"New tank readings : {new_tank}")
         log_msg(f"Duplicates skipped: {duplicates}")
 
-        # Customers
+        # Customers 
         log_msg("Syncing customers from mWater...")
         new_customers = sync_customers(
             system_id, system_name, form_id,
@@ -545,7 +546,7 @@ def sync_system(
         )
         log_msg(f"New bills         : {new_bills}")
 
-        # Payments 
+        # Payments
         log_msg("Syncing payments...")
         new_payments = sync_payments(
             system_id, session, cfg, sys_cfg, log
@@ -635,7 +636,7 @@ def sync_customers(
     water_system_id = sys_cfg["water_system_id"]
 
     try:
-        # Fetch water points for this group
+        # Fetch water points for this group 
         all_wps = []
         skip    = 0
         while True:
@@ -1007,24 +1008,60 @@ def sync_billing(
                     sms_sent    = False,
                 ))
                 new_bills += 1
+            else:
+                # Update if mWater has a different amount —
+                # catches corrections made in the accounts portal.
+                # Reset amount_paid proportionally if billed changed.
+                if existing.amount != amount or                    existing.units_m3 != units_m3:
+                    old_amount = existing.amount or 0
+                    old_paid   = existing.amount_paid or 0
+                    # Scale paid amount to new bill amount
+                    if old_amount > 0 and old_paid > 0:
+                        ratio = min(old_paid / old_amount, 1.0)
+                        existing.amount_paid = round(
+                            amount * ratio, 0
+                        )
+                    existing.amount   = amount
+                    existing.units_m3 = units_m3
+                    existing.is_paid  = (
+                        existing.amount_paid >= amount
+                    )
+                    log_msg(
+                        f"  ↻ Updated bill {bill_month} "
+                        f"for {customer.account_no}: "
+                        f"{old_amount} → {amount}"
+                    )
 
         session.commit()
         log_msg(f"  New bills added: {new_bills}")
 
-        # Allocate payments across bills 
+        # Allocate payments across bills
+        # Uses the payments TABLE (all sources: mWater-synced
+        # AND manually recorded in the app). This prevents
+        # manual payments being overwritten on the next sync.
         log_msg("  Recalculating payment allocation...")
-        updated = 0
-        for meter_no, total_paid in cust_paid.items():
-            customer = (
-                session.query(Customer).filter_by(
-                    system_id=system_id, meter_no=meter_no
-                ).first()
-                or session.query(Customer).filter_by(
-                    system_id=system_id, account_no=meter_no
-                ).first()
-            )
-            if not customer:
+
+        try:
+            pay_rows = session.execute(sql_text(
+                "SELECT customer_id, SUM(amount) "
+                "FROM payments "
+                "WHERE system_id = :sid "
+                "GROUP BY customer_id"
+            ), {"sid": system_id}).fetchall()
+            db_paid = {row[0]: float(row[1] or 0) for row in pay_rows}
+        except Exception:
+            db_paid = {}
+
+        updated   = 0
+        all_custs = session.query(Customer).filter_by(
+            system_id=system_id
+        ).all()
+
+        for customer in all_custs:
+            total_paid = db_paid.get(customer.id, 0.0)
+            if total_paid == 0:
                 continue
+
             cust_bills = session.query(Bill).filter_by(
                 system_id=system_id, customer_id=customer.id
             ).order_by(Bill.bill_month).all()
@@ -1033,18 +1070,18 @@ def sync_billing(
             for bill in cust_bills:
                 bill_amount = bill.amount or 0
                 if remaining >= bill_amount:
-                    new_paid, new_paid_flag = bill_amount, True
+                    new_paid, new_flag = bill_amount, True
                     remaining -= bill_amount
                 elif remaining > 0:
-                    new_paid, new_paid_flag = remaining, False
+                    new_paid, new_flag = remaining, False
                     remaining = 0
                 else:
-                    new_paid, new_paid_flag = 0.0, False
+                    new_paid, new_flag = 0.0, False
 
                 if bill.amount_paid != new_paid \
-                   or bill.is_paid != new_paid_flag:
+                   or bill.is_paid != new_flag:
                     bill.amount_paid = new_paid
-                    bill.is_paid     = new_paid_flag
+                    bill.is_paid     = new_flag
                     updated += 1
 
         session.commit()
