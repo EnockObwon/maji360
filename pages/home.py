@@ -18,7 +18,7 @@ def show():
 
     session = get_session()
 
-    # Build available billing periods
+    # Build available billing periods 
     all_bills  = session.query(Bill).filter_by(system_id=system_id).all()
     all_months = sorted(
         {b.bill_month for b in all_bills if b.bill_month},
@@ -38,7 +38,7 @@ def show():
         system_id=system_id, is_active=True
     ).count()
 
-    # Header
+    # Header 
     st.markdown(f"## {system_name}")
     st.markdown(
         f"<span style='font-size:13px; color:#64748b'>"
@@ -47,31 +47,73 @@ def show():
     )
     st.divider()
 
-    # Period selector
-    period_options = ["All time"] + all_months
-    col_p1, col_p2 = st.columns([2, 5])
+    # Period selector — year then month 
+    available_years = sorted(
+        {b.bill_month[:4] for b in all_bills if b.bill_month},
+        reverse=True
+    )
+    year_options = ["All time"] + available_years
+
+    col_p1, col_p2, col_p3 = st.columns([2, 2, 3])
     with col_p1:
-        selected_period = st.selectbox(
-            "Period",
-            options  = period_options,
-            index    = 0,
-            key      = "home_period",
-            help     = "Filter billing metrics by month. "
-                       "NRW always shows the most recent month with data."
+        sel_year = st.selectbox(
+            "Year",
+            options = year_options,
+            index   = 0,
+            key     = "home_year"
         )
+
+    with col_p2:
+        if sel_year == "All time":
+            sel_month = st.selectbox(
+                "Month", options=["—"], key="home_month",
+                disabled=True
+            )
+            selected_period = "All time"
+            period_label    = "All time"
+        else:
+            month_names = {
+                "01": "January",  "02": "February",
+                "03": "March",    "04": "April",
+                "05": "May",      "06": "June",
+                "07": "July",     "08": "August",
+                "09": "September","10": "October",
+                "11": "November", "12": "December",
+            }
+            year_months = sorted(
+                {b.bill_month[5:7]
+                 for b in all_bills
+                 if b.bill_month and b.bill_month[:4] == sel_year},
+                reverse=True
+            )
+            month_opts = ["All months"] + [
+                month_names[m] for m in year_months
+            ]
+            sel_month = st.selectbox(
+                "Month", options=month_opts,
+                index=0, key="home_month"
+            )
+
+            if sel_month == "All months":
+                selected_period = sel_year
+                period_label    = sel_year
+            else:
+                month_num = {v: k for k, v in month_names.items()}.get(sel_month, "")
+                selected_period = f"{sel_year}-{month_num}"
+                period_label    = f"{sel_month} {sel_year}"
 
     # Filter bills by period 
     if selected_period == "All time":
-        period_bills  = all_bills
-        period_label  = "All time"
+        period_bills = all_bills
+    elif len(selected_period) == 4:
+        period_bills = [
+            b for b in all_bills
+            if b.bill_month and b.bill_month.startswith(selected_period)
+        ]
     else:
-        period_bills  = [b for b in all_bills if b.bill_month == selected_period]
-        try:
-            period_label = datetime.strptime(
-                selected_period, "%Y-%m"
-            ).strftime("%B %Y")
-        except Exception:
-            period_label = selected_period
+        period_bills = [
+            b for b in all_bills if b.bill_month == selected_period
+        ]
 
     total_billed      = sum(b.amount      or 0 for b in period_bills)
     total_paid        = sum(b.amount_paid or 0 for b in period_bills)
@@ -89,7 +131,7 @@ def show():
         NRWRecord.nrw_percent     > 0
     ).order_by(NRWRecord.month.desc()).first()
 
-    # Outstanding balances (always all-time per customer) 
+    # ── Outstanding balances (always all-time per customer) ─
     customers = session.query(Customer).filter_by(
         system_id=system_id, is_active=True
     ).all()
@@ -107,7 +149,7 @@ def show():
                 "Outstanding": f"{currency} {owed:,.0f}"
             })
 
-    # Recent readings
+    # Recent readings 
     pump_readings = session.query(DailyReading).filter(
         DailyReading.system_id         == system_id,
         DailyReading.water_produced_m3  > 0
