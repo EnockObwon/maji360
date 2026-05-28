@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
+from datetime import datetime
 from core.database import get_session, DailyReading, Bill, NRWRecord, Customer
 from core.auth import require_login
-from sqlalchemy import func
 
 
 def show():
@@ -18,7 +18,70 @@ def show():
 
     session = get_session()
 
-    # ── Latest NRW ────────────────────────────────────────
+    # Build available billing periods
+    all_bills  = session.query(Bill).filter_by(system_id=system_id).all()
+    all_months = sorted(
+        {b.bill_month for b in all_bills if b.bill_month},
+        reverse=True
+    )
+
+    # Last sync time 
+    last_reading = session.query(DailyReading).filter_by(
+        system_id=system_id
+    ).order_by(DailyReading.synced_at.desc()).first()
+    last_sync = (
+        last_reading.synced_at.strftime("%d %b %Y %H:%M")
+        if last_reading and last_reading.synced_at else "Never"
+    )
+
+    total_customers = session.query(Customer).filter_by(
+        system_id=system_id, is_active=True
+    ).count()
+
+    # Header
+    st.markdown(f"## {system_name}")
+    st.markdown(
+        f"<span style='font-size:13px; color:#64748b'>"
+        f"Last synced: {last_sync} UTC</span>",
+        unsafe_allow_html=True
+    )
+    st.divider()
+
+    # Period selector
+    period_options = ["All time"] + all_months
+    col_p1, col_p2 = st.columns([2, 5])
+    with col_p1:
+        selected_period = st.selectbox(
+            "Period",
+            options  = period_options,
+            index    = 0,
+            key      = "home_period",
+            help     = "Filter billing metrics by month. "
+                       "NRW always shows the most recent month with data."
+        )
+
+    # Filter bills by period 
+    if selected_period == "All time":
+        period_bills  = all_bills
+        period_label  = "All time"
+    else:
+        period_bills  = [b for b in all_bills if b.bill_month == selected_period]
+        try:
+            period_label = datetime.strptime(
+                selected_period, "%Y-%m"
+            ).strftime("%B %Y")
+        except Exception:
+            period_label = selected_period
+
+    total_billed      = sum(b.amount      or 0 for b in period_bills)
+    total_paid        = sum(b.amount_paid or 0 for b in period_bills)
+    total_outstanding = total_billed - total_paid
+    collection_rate   = (
+        round((total_paid / total_billed) * 100, 1)
+        if total_billed > 0 else 0
+    )
+
+    # NRW — always most recent month with data 
     latest_nrw = session.query(NRWRecord).filter(
         NRWRecord.system_id      == system_id,
         NRWRecord.water_produced  > 0,
@@ -26,32 +89,7 @@ def show():
         NRWRecord.nrw_percent     > 0
     ).order_by(NRWRecord.month.desc()).first()
 
-    # ── Billing totals ────────────────────────────────────
-    all_bills         = session.query(Bill).filter_by(system_id=system_id).all()
-    total_billed      = sum(b.amount      or 0 for b in all_bills)
-    total_paid        = sum(b.amount_paid or 0 for b in all_bills)
-    total_outstanding = total_billed - total_paid
-    collection_rate   = (
-        round((total_paid / total_billed) * 100, 1)
-        if total_billed > 0 else 0
-    )
-
-    total_customers = session.query(Customer).filter_by(
-        system_id=system_id, is_active=True
-    ).count()
-
-    last_reading = session.query(DailyReading).filter_by(
-        system_id=system_id
-    ).order_by(DailyReading.synced_at.desc()).first()
-
-    last_sync = (
-        last_reading.synced_at.strftime("%d %b %Y %H:%M")
-        if last_reading and last_reading.synced_at
-        else "Never"
-    )
-
-    # ── Outstanding balances per customer ─────────────────
-    # No account_no format filter — works for any system.
+    # Outstanding balances (always all-time per customer) 
     customers = session.query(Customer).filter_by(
         system_id=system_id, is_active=True
     ).all()
@@ -69,7 +107,7 @@ def show():
                 "Outstanding": f"{currency} {owed:,.0f}"
             })
 
-    # ── Recent readings ───────────────────────────────────
+    # Recent readings
     pump_readings = session.query(DailyReading).filter(
         DailyReading.system_id         == system_id,
         DailyReading.water_produced_m3  > 0
@@ -82,16 +120,7 @@ def show():
 
     session.close()
 
-    # ── Header ────────────────────────────────────────────
-    st.markdown(f"## {system_name}")
-    st.markdown(
-        f"<span style='font-size:13px; color:#64748b'>"
-        f"Last synced: {last_sync} UTC</span>",
-        unsafe_allow_html=True
-    )
-    st.divider()
-
-    # ── NRW banner ────────────────────────────────────────
+    # NRW banner 
     if latest_nrw:
         nrw_pct = latest_nrw.nrw_percent or 0
         month   = latest_nrw.month
@@ -116,10 +145,15 @@ def show():
     else:
         st.info("No readings synced yet for this system.")
 
-    # ── KPI cards ─────────────────────────────────────────
-    st.markdown("### System overview")
+    # KPI cards 
+    st.markdown(
+        f"### System overview "
+        f"<span style='font-size:14px; font-weight:400; color:#64748b'>"
+        f"— {period_label}</span>",
+        unsafe_allow_html=True
+    )
+
     def _fmt(val):
-        # Abbreviate to avoid metric truncation in narrow columns
         if val >= 1_000_000:
             return f"{currency} {val / 1_000_000:.2f}M"
         if val >= 10_000:
@@ -127,7 +161,6 @@ def show():
         return f"{currency} {val:,.0f}"
 
     c1, c2, c3, c4, c5 = st.columns(5)
-
     with c1:
         st.metric(
             "NRW rate",
@@ -144,11 +177,12 @@ def show():
 
     st.divider()
 
-    # ── Two-column layout ─────────────────────────────────
+    # Two-column layout 
     col_left, col_right = st.columns(2)
 
     with col_left:
         st.markdown("### Outstanding balances")
+        st.caption("All-time net balance per customer")
         if outstanding_rows:
             st.dataframe(
                 pd.DataFrame(outstanding_rows),
