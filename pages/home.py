@@ -118,6 +118,14 @@ def show():
 
     # ── KPI cards ─────────────────────────────────────────
     st.markdown("### System overview")
+    def _fmt(val):
+        # Abbreviate to avoid metric truncation in narrow columns
+        if val >= 1_000_000:
+            return f"{currency} {val / 1_000_000:.2f}M"
+        if val >= 10_000:
+            return f"{currency} {val / 1_000:.0f}K"
+        return f"{currency} {val:,.0f}"
+
     c1, c2, c3, c4, c5 = st.columns(5)
 
     with c1:
@@ -128,19 +136,9 @@ def show():
     with c2:
         st.metric("Customers", total_customers)
     with c3:
-        st.metric(
-            "Total billed",
-            f"{currency} {total_billed / 1_000_000:.2f}M"
-            if total_billed >= 1_000_000
-            else f"{currency} {total_billed:,.0f}"
-        )
+        st.metric("Total billed",    _fmt(total_billed))
     with c4:
-        st.metric(
-            "Collected",
-            f"{currency} {total_paid / 1_000_000:.2f}M"
-            if total_paid >= 1_000_000
-            else f"{currency} {total_paid:,.0f}"
-        )
+        st.metric("Collected",       _fmt(total_paid))
     with c5:
         st.metric("Collection rate", f"{collection_rate}%")
 
