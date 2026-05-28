@@ -1,6 +1,4 @@
-# ══════════════════════════════════════════════════════════════
 # Maji360 · core/sync.py  v2.0  — Multi-System Sync Engine
-# ══════════════════════════════════════════════════════════════
 #
 # Key changes from v1.5:
 #   • All hardcoded GROUP_ID / WATER_SYSTEM_ID / FIELD_IDS /
@@ -11,7 +9,6 @@
 #   • accounts_base / accounts_key can be overridden per-system.
 #   • Every sync run is recorded in sync_logs.
 #   • sync_system() return dict is unchanged — all callers safe.
-# ══════════════════════════════════════════════════════════════
 
 import time
 import requests
@@ -34,12 +31,11 @@ except ImportError:
     _SYNCLOG_AVAILABLE = False
 
 
-# ─────────────────────────────────────────────────────────────
 # Karungu (system 1) fallback constants
 # Used ONLY when the corresponding column on water_systems
 # is NULL — i.e., before the migration is run or for legacy
 # data. New systems must have their values set in the DB.
-# ─────────────────────────────────────────────────────────────
+
 _DEFAULT_GROUP_ID        = "718ce61fbf4f4742bd1018cabf90d1e8"
 _DEFAULT_WATER_SYSTEM_ID = "b0e76a15-7047-4c5e-a986-e2bba550a4ff"
 
@@ -70,9 +66,46 @@ CONN_TYPE_MAP = {
 }
 
 
-# ─────────────────────────────────────────────────────────────
+def _infer_connection_type(name: str, wp_type: str = None) -> str:
+    """
+    Determine connection type from mWater water point type field
+    (preferred) or by keyword-matching the customer name.
+    Returns "PSP", "Private", or "Institutional".
+    """
+    # mWater water point type field takes priority
+    if wp_type and wp_type in CONN_TYPE_MAP:
+        return CONN_TYPE_MAP[wp_type]
+
+    n = name.lower()
+
+    # Institutional — schools, churches, health facilities
+    if any(w in n for w in [
+        "school", "p/s", "nursery", "church", "cou",
+        "catholic", "mosque", "hospital", "clinic",
+        "health centre", "lodge", "market"
+    ]):
+        return "Institutional"
+
+    # PSP — shared/public taps
+    if any(w in n for w in [
+        "psp", "public stand", "stand post",
+        "public tap", "main public", "tap stand",
+        "pump house"
+    ]):
+        return "PSP"
+
+    # Private — individual yard/household connections
+    if any(w in n for w in [
+        "private", "yard tap", "residence",
+        "house", "home"
+    ]):
+        return "Private"
+
+    # Default
+    return "PSP"
+
+
 # Helpers
-# ─────────────────────────────────────────────────────────────
 
 def get_mwater_config(system: WaterSystem = None) -> dict:
     """
@@ -243,9 +276,7 @@ def _write_sync_log(
         pass   # never let logging crash a sync
 
 
-# ─────────────────────────────────────────────────────────────
 # Main entry point
-# ─────────────────────────────────────────────────────────────
 
 def sync_system(
     system_id:    int,
@@ -310,7 +341,7 @@ def sync_system(
             session.close()
             return {"error": err_msg, "system": system_name}
 
-        # ── Fetch all mWater responses ─────────────────────
+        # Fetch all mWater responses
         log_msg("Fetching mWater responses...")
         all_responses = []
         skip = 0
@@ -375,7 +406,7 @@ def sync_system(
 
         all_responses.sort(key=_submitted_dt)
 
-        # ── Existing response IDs (skip duplicates) ────────
+        # Existing response IDs (skip duplicates) 
         # Check GLOBALLY across all systems, not just the
         # current one. When two systems share the same form,
         # each response belongs to exactly one system.
@@ -392,13 +423,13 @@ def sync_system(
             if row[0]
         )
 
-        # ── Cumulative baseline readings ───────────────────
+        # Cumulative baseline readings 
         last_pump_end, last_tank_end = \
             get_last_end_readings(system_id, session)
         log_msg(f"Last pump end   : {last_pump_end}")
         log_msg(f"Last tank end   : {last_tank_end}")
 
-        # ── Field IDs for this system ──────────────────────
+        # Field IDs for this system 
         fids     = sys_cfg["field_ids"]
         pump_end_fid = fids.get(
             "pump_end", _DEFAULT_FIELD_IDS["pump_end"]
@@ -407,7 +438,7 @@ def sync_system(
             "tank_end", _DEFAULT_FIELD_IDS["tank_end"]
         )
 
-        # ── Parse and save new readings ────────────────────
+        # Parse and save new readings 
         new_pump   = 0
         new_tank   = 0
         duplicates = 0
@@ -430,7 +461,7 @@ def sync_system(
             except Exception:
                 reading_date = datetime.now(timezone.utc)
 
-            # ── Cumulative pump volume ─────────────────────
+            # Cumulative pump volume
             pumped = 0.0
             if pe is not None:
                 if last_pump_end is not None:
@@ -449,7 +480,7 @@ def sync_system(
                     )
                 last_pump_end = pe
 
-            # ── Cumulative tank volume ─────────────────────
+            # Cumulative tank volume 
             consumed = 0.0
             if te is not None:
                 if last_tank_end is not None:
@@ -492,7 +523,7 @@ def sync_system(
         log_msg(f"New tank readings : {new_tank}")
         log_msg(f"Duplicates skipped: {duplicates}")
 
-        # ── Customers ──────────────────────────────────────
+        # Customers
         log_msg("Syncing customers from mWater...")
         new_customers = sync_customers(
             system_id, system_name, form_id,
@@ -500,28 +531,28 @@ def sync_system(
         )
         log_msg(f"New customers     : {new_customers}")
 
-        # ── Billing ────────────────────────────────────────
+        # Billing 
         log_msg("Syncing billing...")
         new_bills = sync_billing(
             system_id, session, cfg, sys_cfg, log
         )
         log_msg(f"New bills         : {new_bills}")
 
-        # ── Payments ───────────────────────────────────────
+        # Payments
         log_msg("Syncing payments...")
         new_payments = sync_payments(
             system_id, session, cfg, sys_cfg, log
         )
         log_msg(f"New payments      : {new_payments}")
 
-        # ── Expenses ───────────────────────────────────────
+        # Expenses 
         log_msg("Syncing expenses...")
         new_expenses = sync_expenses(
             system_id, session, cfg, log
         )
         log_msg(f"New expenses      : {new_expenses}")
 
-        # ── NRW recalculation ──────────────────────────────
+        # NRW recalculation
         log_msg("Recalculating NRW...")
         recalculate_nrw(system_id, session)
 
@@ -572,9 +603,7 @@ def sync_system(
     return results
 
 
-# ─────────────────────────────────────────────────────────────
 # sync_customers
-# ─────────────────────────────────────────────────────────────
 
 def sync_customers(
     system_id:   int,
@@ -599,7 +628,7 @@ def sync_customers(
     water_system_id = sys_cfg["water_system_id"]
 
     try:
-        # ── Fetch water points for this group ──────────────
+        # Fetch water points for this group
         all_wps = []
         skip    = 0
         while True:
@@ -648,7 +677,7 @@ def sync_customers(
             f"  Already in Maji360     : {len(existing_meters)}"
         )
 
-        # ── Build meter → account-number map ──────────────
+        # Build meter → account-number map 
         meter_code_map   = sys_cfg["meter_code_map"]  # code → meter_no
         meter_to_account = {}  # meter_no → account_no (meter_code_map path)
         acc_name_to_code = {}  # name.lower() → accounts code (name-match path)
@@ -734,15 +763,19 @@ def sync_customers(
 
             account_no = matched_acc or                 f"{system_name[:3].upper()}-{code}"
 
+            wp_type         = wp.get("type_improved") or wp.get("type_")
+            connection_type = _infer_connection_type(name, wp_type)
+
             session.add(Customer(
-                system_id  = system_id,
-                name       = name,
-                account_no = account_no,
-                meter_no   = code,
-                address    = desc,
-                latitude   = lat,
-                longitude  = lon,
-                is_active  = True,
+                system_id       = system_id,
+                name            = name,
+                account_no      = account_no,
+                meter_no        = code,
+                address         = desc,
+                latitude        = lat,
+                longitude       = lon,
+                connection_type = connection_type,
+                is_active       = True,
             ))
             existing_meters.add(code)
             new_count += 1
@@ -753,7 +786,7 @@ def sync_customers(
 
         session.commit()
 
-        # ── Accounts API customer sync ─────────────────────
+        # Accounts API customer sync 
         # Used when meter_code_map is empty (e.g. NYAKABALE).
         # Pulls customers directly from the mWater accounts
         # system using their numeric IDs (10001, 10002...).
@@ -828,12 +861,15 @@ def _sync_customers_from_accounts(
 
             # account_no = accounts API code (e.g. "10001")
             # meter_no   = same, used for billing lookup
+            connection_type = _infer_connection_type(name)
+
             session.add(Customer(
-                system_id  = system_id,
-                name       = name,
-                account_no = code,
-                meter_no   = code,
-                is_active  = True,
+                system_id       = system_id,
+                name            = name,
+                account_no      = code,
+                meter_no        = code,
+                connection_type = connection_type,
+                is_active       = True,
             ))
             existing_accounts.add(code)
             new_count += 1
@@ -848,9 +884,7 @@ def _sync_customers_from_accounts(
         return 0
 
 
-# ─────────────────────────────────────────────────────────────
 # sync_billing
-# ─────────────────────────────────────────────────────────────
 
 def sync_billing(
     system_id: int,
@@ -964,7 +998,7 @@ def sync_billing(
         session.commit()
         log_msg(f"  New bills added: {new_bills}")
 
-        # ── Allocate payments across bills ─────────────────
+        # Allocate payments across bills 
         log_msg("  Recalculating payment allocation...")
         updated = 0
         for meter_no, total_paid in cust_paid.items():
@@ -1009,9 +1043,7 @@ def sync_billing(
         return 0
 
 
-# ─────────────────────────────────────────────────────────────
 # sync_payments
-# ─────────────────────────────────────────────────────────────
 
 def sync_payments(
     system_id: int,
@@ -1136,9 +1168,7 @@ def sync_payments(
         return 0
 
 
-# ─────────────────────────────────────────────────────────────
 # sync_expenses  (no per-system changes needed here yet)
-# ─────────────────────────────────────────────────────────────
 
 def sync_expenses(
     system_id: int,
@@ -1228,9 +1258,7 @@ def sync_expenses(
         return 0
 
 
-# ─────────────────────────────────────────────────────────────
 # recalculate_nrw  (unchanged logic, kept here for completeness)
-# ─────────────────────────────────────────────────────────────
 
 def recalculate_nrw(system_id: int, session) -> None:
     readings = session.query(DailyReading).filter_by(
@@ -1277,10 +1305,8 @@ def recalculate_nrw(system_id: int, session) -> None:
     session.commit()
 
 
-# ─────────────────────────────────────────────────────────────
 # Private helper: paginated transaction fetch
 # (de-duplicates the identical loop in billing/payments/expenses)
-# ─────────────────────────────────────────────────────────────
 
 def _fetch_all_transactions(
     accounts_base: str, accounts_key: str
