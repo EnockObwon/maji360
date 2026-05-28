@@ -1,5 +1,4 @@
 # Maji360 · core/sync.py  v2.0  — Multi-System Sync Engine
-#
 # Key changes from v1.5:
 #   • All hardcoded GROUP_ID / WATER_SYSTEM_ID / FIELD_IDS /
 #     KR_TO_METER removed from module level.
@@ -35,7 +34,6 @@ except ImportError:
 # Used ONLY when the corresponding column on water_systems
 # is NULL — i.e., before the migration is run or for legacy
 # data. New systems must have their values set in the DB.
-
 _DEFAULT_GROUP_ID        = "718ce61fbf4f4742bd1018cabf90d1e8"
 _DEFAULT_WATER_SYSTEM_ID = "b0e76a15-7047-4c5e-a986-e2bba550a4ff"
 
@@ -70,7 +68,10 @@ def _infer_connection_type(name: str, wp_type: str = None) -> str:
     """
     Determine connection type from mWater water point type field
     (preferred) or by keyword-matching the customer name.
-    Returns "PSP", "Private", or "Institutional".
+
+    Returns one of: "PSP" | "Private" | "School" | "Institution"
+    These match the DHIS2 Uganda Water Sector reporting categories
+    and the values expected by reports.py.
     """
     # mWater water point type field takes priority
     if wp_type and wp_type in CONN_TYPE_MAP:
@@ -78,13 +79,19 @@ def _infer_connection_type(name: str, wp_type: str = None) -> str:
 
     n = name.lower()
 
-    # Institutional — schools, churches, health facilities
+    # Schools — separate DHIS2 category
     if any(w in n for w in [
-        "school", "p/s", "nursery", "church", "cou",
-        "catholic", "mosque", "hospital", "clinic",
-        "health centre", "lodge", "market"
+        "school", "p/s", "nursery", "kindergarten"
     ]):
-        return "Institutional"
+        return "School"
+
+    # Other institutional — churches, health, commercial
+    if any(w in n for w in [
+        "church", "cou", "catholic", "mosque",
+        "hospital", "clinic", "health centre",
+        "lodge", "market", "trading centre"
+    ]):
+        return "Institution"
 
     # PSP — shared/public taps
     if any(w in n for w in [
@@ -341,7 +348,7 @@ def sync_system(
             session.close()
             return {"error": err_msg, "system": system_name}
 
-        # Fetch all mWater responses
+        # Fetch all mWater responses 
         log_msg("Fetching mWater responses...")
         all_responses = []
         skip = 0
@@ -429,7 +436,7 @@ def sync_system(
         log_msg(f"Last pump end   : {last_pump_end}")
         log_msg(f"Last tank end   : {last_tank_end}")
 
-        # Field IDs for this system 
+        # Field IDs for this system
         fids     = sys_cfg["field_ids"]
         pump_end_fid = fids.get(
             "pump_end", _DEFAULT_FIELD_IDS["pump_end"]
@@ -438,7 +445,7 @@ def sync_system(
             "tank_end", _DEFAULT_FIELD_IDS["tank_end"]
         )
 
-        # Parse and save new readings 
+        # Parse and save new readings
         new_pump   = 0
         new_tank   = 0
         duplicates = 0
@@ -461,7 +468,7 @@ def sync_system(
             except Exception:
                 reading_date = datetime.now(timezone.utc)
 
-            # Cumulative pump volume
+            # Cumulative pump volume 
             pumped = 0.0
             if pe is not None:
                 if last_pump_end is not None:
@@ -538,7 +545,7 @@ def sync_system(
         )
         log_msg(f"New bills         : {new_bills}")
 
-        # Payments
+        # Payments 
         log_msg("Syncing payments...")
         new_payments = sync_payments(
             system_id, session, cfg, sys_cfg, log
@@ -552,7 +559,7 @@ def sync_system(
         )
         log_msg(f"New expenses      : {new_expenses}")
 
-        # NRW recalculation
+        # NRW recalculation 
         log_msg("Recalculating NRW...")
         recalculate_nrw(system_id, session)
 
@@ -677,7 +684,7 @@ def sync_customers(
             f"  Already in Maji360     : {len(existing_meters)}"
         )
 
-        # Build meter → account-number map 
+        # Build meter → account-number map
         meter_code_map   = sys_cfg["meter_code_map"]  # code → meter_no
         meter_to_account = {}  # meter_no → account_no (meter_code_map path)
         acc_name_to_code = {}  # name.lower() → accounts code (name-match path)
@@ -969,6 +976,12 @@ def sync_billing(
                     system_id=system_id, account_no=kr_code
                 ).first()
             if not customer:
+                log_msg(
+                    f"  ⚠ Unmatched billing txn: "
+                    f"acc={cust_acc_id} "
+                    f"code={kr_code} "
+                    f"amount={t.get('amount',0)}"
+                )
                 continue
 
             date_str   = t.get("date", "")
@@ -1311,17 +1324,23 @@ def recalculate_nrw(system_id: int, session) -> None:
 def _fetch_all_transactions(
     accounts_base: str, accounts_key: str
 ) -> list[dict]:
+    """
+    Fetch all transactions with pagination.
+    Uses limit=200 (mWater max) to minimise
+    round-trips and reduce risk of partial fetches.
+    """
     all_txns: list[dict] = []
-    skip = 0
+    skip  = 0
+    limit = 200
     while True:
         r = requests.get(
             f"{accounts_base}/transactions",
             params={
                 "client": accounts_key,
-                "limit":  50,
+                "limit":  limit,
                 "skip":   skip,
             },
-            timeout=30,
+            timeout=60,
         )
         if r.status_code != 200 or not r.text.strip():
             break
@@ -1329,7 +1348,7 @@ def _fetch_all_transactions(
         if not batch:
             break
         all_txns.extend(batch)
-        if len(batch) < 50:
+        if len(batch) < limit:
             break
-        skip += 50
+        skip += limit
     return all_txns
