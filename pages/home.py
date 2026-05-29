@@ -123,13 +123,24 @@ def show():
         if total_billed > 0 else 0
     )
 
-    # NRW — always most recent month with data 
-    latest_nrw = session.query(NRWRecord).filter(
-        NRWRecord.system_id      == system_id,
-        NRWRecord.water_produced  > 0,
-        NRWRecord.water_billed    > 0,
-        NRWRecord.nrw_percent     > 0
-    ).order_by(NRWRecord.month.desc()).first()
+    # NRW — filtered by selected period 
+    nrw_q = session.query(NRWRecord).filter(
+        NRWRecord.system_id     == system_id,
+        NRWRecord.water_produced > 0,
+    )
+    if selected_period == "All time":
+        nrw_q = nrw_q.filter(
+            NRWRecord.nrw_percent > 0
+        ).order_by(NRWRecord.month.desc())
+    elif len(selected_period) == 4:
+        nrw_q = nrw_q.filter(
+            NRWRecord.month.like(f"{selected_period}%")
+        ).order_by(NRWRecord.month.desc())
+    else:
+        nrw_q = nrw_q.filter(
+            NRWRecord.month == selected_period
+        )
+    latest_nrw = nrw_q.first()
 
     # ── Outstanding balances (always all-time per customer) ─
     customers = session.query(Customer).filter_by(
