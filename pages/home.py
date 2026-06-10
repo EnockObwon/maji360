@@ -350,7 +350,7 @@ def show():
                     "range": [0, 60],
                     "tickwidth": 1,
                     "tickcolor": "#94a3b8",
-                    "tickvals": [0, 5, 10, 15, 30, 35, 40, 45, 50, 55, 60],
+                    "tickvals": [0, 10, 20, 30, 40, 50, 60],
                 },
                 "bar": {"color": "#ef4444" if nrw_val >= 20 else "#22c55e", "thickness": 0.25},
                 "bgcolor": "white",
