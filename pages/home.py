@@ -316,7 +316,11 @@ def show():
                 margin        = dict(t=4, b=4, l=0, r=0),
                 plot_bgcolor  = "white",
                 paper_bgcolor = "white",
-                yaxis         = dict(title="m³", gridcolor="#f1f5f9"),
+                yaxis         = dict(
+                    title     = "m³",
+                    gridcolor = "#f1f5f9",
+                    dtick     = 5,
+                ),
                 xaxis         = dict(gridcolor="#f1f5f9", tickangle=-35),
                 legend        = dict(
                     orientation="h", yanchor="bottom",
