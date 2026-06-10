@@ -213,7 +213,7 @@ def show_login():
         st.markdown(
             "<div style='text-align:center; margin-top:2rem;"
             "font-size:12px; color:#94a3b8'>"
-            "Maji360 v1.6.0 · Sub-Saharan Africa</div>",
+            "Maji360 v1.7.0 · Sub-Saharan Africa</div>",
             unsafe_allow_html=True
         )
 
@@ -403,7 +403,7 @@ def show_sidebar():
         return current_page, systems
 
 
-# ── Main ───────────────────────────────────────────────────────
+# Main 
 if "user" not in st.session_state:
     show_login()
 else:
