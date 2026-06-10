@@ -34,7 +34,7 @@ def show():
         system_id=system_id, is_active=True
     ).count()
 
-    # Header 
+    # Header
     st.markdown(f"## {system_name}")
     st.markdown(
         f"<span style='font-size:13px; color:#64748b'>"
@@ -222,7 +222,7 @@ def show():
     # Two-column layout 
     col_left, col_right = st.columns(2)
 
-    # Outstanding balances — horizontal bar chart 
+    # Outstanding balances — horizontal bar chart
     with col_left:
         st.markdown("### Outstanding balances")
         st.caption("All-time net balance per customer")
@@ -274,56 +274,80 @@ def show():
             else:
                 st.info("No customers registered yet.")
 
-    # Recent readings — combined area chart
+    # Recent readings — bars (pumped) + dots (tank)
     with col_right:
-        st.markdown("### Water flow")
-        st.caption("💧 Pumped vs consumed — gap = NRW")
+        st.markdown("### Daily water readings")
+        st.caption(
+            "🟢 Bars = daily tank outlet readings  · "
+            "🔵 Dots = pump house (only triggered when tank level drops)"
+        )
 
         if recent_readings:
-            # Combine pump and tank readings by date
-            by_date = defaultdict(lambda: {"pumped": None, "consumed": None})
-            for r in recent_readings:
+            # Separate pumped (daily) from consumed (irregular)
+            pump_dates = []
+            pump_vals  = []
+            tank_dates = []
+            tank_vals  = []
+
+            for r in sorted(recent_readings,
+                            key=lambda x: x.reading_date):
                 d = r.reading_date.strftime("%d %b")
                 if r.water_produced_m3 and r.water_produced_m3 > 0:
-                    by_date[d]["pumped"]   = r.water_produced_m3
+                    pump_dates.append(d)
+                    pump_vals.append(r.water_produced_m3)
                 if r.water_consumed_m3 and r.water_consumed_m3 > 0:
-                    by_date[d]["consumed"] = r.water_consumed_m3
-
-            dates    = sorted(by_date.keys(), key=lambda x: datetime.strptime(x, "%d %b"))
-            pumped   = [by_date[d]["pumped"]   for d in dates]
-            consumed = [by_date[d]["consumed"] for d in dates]
+                    tank_dates.append(d)
+                    tank_vals.append(r.water_consumed_m3)
 
             fig_flow = go.Figure()
-            fig_flow.add_trace(go.Scatter(
-                name      = "Pumped",
-                x         = dates,
-                y         = pumped,
-                mode      = "lines+markers",
-                line      = dict(color="#3b82f6", width=2.5),
-                marker    = dict(size=6),
-                fill      = "tozeroy",
-                fillcolor = "rgba(59,130,246,0.10)",
-            ))
-            fig_flow.add_trace(go.Scatter(
-                name      = "Consumed",
-                x         = dates,
-                y         = consumed,
-                mode      = "lines+markers",
-                line      = dict(color="#22c55e", width=2.5),
-                marker    = dict(size=6),
-                fill      = "tozeroy",
-                fillcolor = "rgba(34,197,94,0.15)",
-            ))
+
+            # Tank outlet — daily bars (regular, every day)
+            if tank_dates:
+                fig_flow.add_trace(go.Bar(
+                    name         = "Tank outlet (m³)",
+                    x            = tank_dates,
+                    y            = tank_vals,
+                    marker_color = "rgba(34,197,94,0.75)",
+                    marker_line  = dict(color="#16a34a", width=1),
+                ))
+
+            # Pump house — dots only (irregular, only when tank level drops)
+            if pump_dates:
+                fig_flow.add_trace(go.Scatter(
+                    name      = "Pump house (m³)",
+                    x         = pump_dates,
+                    y         = pump_vals,
+                    mode      = "markers",
+                    marker    = dict(
+                        color  = "#3b82f6",
+                        size   = 10,
+                        symbol = "circle",
+                        line   = dict(color="white", width=2)
+                    ),
+                    connectgaps = False,
+                ))
+
             fig_flow.update_layout(
-                height        = max(220, len(dates) * 28),
+                height        = 260,
                 margin        = dict(t=4, b=4, l=0, r=0),
                 plot_bgcolor  = "white",
                 paper_bgcolor = "white",
-                yaxis         = dict(title="m³", gridcolor="#f1f5f9"),
-                xaxis         = dict(gridcolor="#f1f5f9"),
+                barmode       = "overlay",
+                yaxis         = dict(
+                    title     = "m³",
+                    gridcolor = "#f1f5f9"
+                ),
+                xaxis         = dict(
+                    gridcolor = "#f1f5f9",
+                    tickangle = -35,
+                ),
                 legend        = dict(
-                    orientation="h", yanchor="bottom",
-                    y=1.02, xanchor="left", x=0, font=dict(size=11)
+                    orientation = "h",
+                    yanchor     = "bottom",
+                    y           = 1.02,
+                    xanchor     = "left",
+                    x           = 0,
+                    font        = dict(size=11)
                 ),
             )
             st.plotly_chart(fig_flow, use_container_width=True)
@@ -332,7 +356,7 @@ def show():
 
     st.divider()
 
-    # NRW gauge
+    # NRW gauge 
     if latest_nrw:
         st.markdown("### NRW gauge")
         st.caption(f"Non-revenue water — {latest_nrw.month} · Target: below 20%")
