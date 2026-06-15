@@ -44,7 +44,7 @@ def show():
     )
     st.divider()
 
-    # Period selector
+    # Period selector 
     # Include months that have payments even if no bills exist
     # yet for that month — e.g. customers paying May bills in
     # June, before June billing has been generated.
@@ -116,7 +116,7 @@ def show():
     total_paid      = sum(b.amount_paid or 0 for b in period_bills)
     collection_rate = round((total_paid / total_billed) * 100, 1) if total_billed > 0 else 0
 
-    # Cash received — by actual payment date 
+    # Cash received — by actual payment date
     # This reflects real money movement in the period, even
     # when no bills exist yet for that period (e.g. customers
     # paying May bills in June, before June billing is run).
@@ -155,11 +155,10 @@ def show():
             prev_billed = sum(b.amount      or 0 for b in prev_bills)
             prev_paid   = sum(b.amount_paid or 0 for b in prev_bills)
             prev_rate   = round((prev_paid / prev_billed) * 100, 1) if prev_billed > 0 else 0
-            prev_cash   = _cash_received(prev_month)
         else:
-            prev_billed = prev_paid = prev_rate = prev_cash = None
+            prev_billed = prev_paid = prev_rate = None
     else:
-        prev_billed = prev_paid = prev_rate = prev_cash = None
+        prev_billed = prev_paid = prev_rate = None
 
     def _delta(curr, prev):
         if prev is None or prev == 0:
@@ -232,7 +231,7 @@ def show():
     else:
         st.info("No readings synced yet for this system.")
 
-    # KPI cards with delta arrows
+    # KPI cards with delta arrows 
     st.markdown(
         f"### System overview "
         f"<span style='font-size:14px;font-weight:400;color:#64748b'>"
@@ -248,7 +247,7 @@ def show():
     nrw_pct      = latest_nrw.nrw_percent if latest_nrw else None
     prev_nrw_pct = prev_nrw.nrw_percent   if prev_nrw  else None
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         nrw_delta = _delta(nrw_pct, prev_nrw_pct) if nrw_pct and prev_nrw_pct else None
         st.metric("NRW rate",        f"{nrw_pct:.1f}%" if nrw_pct else "—", delta=nrw_delta,
@@ -264,17 +263,18 @@ def show():
     with c5:
         st.metric("Collection rate", f"{collection_rate}%",
                   delta=_delta(collection_rate, prev_rate) if prev_rate else None)
-    with c6:
-        st.metric("Cash received",   _fmt(cash_received),
-                  delta=_delta(cash_received, prev_cash) if prev_cash else None,
-                  help="Actual cash received in this period, by payment date — "
-                       "includes payments toward bills from any month.")
 
-    st.caption(
-        "💡 **Collected** = amount allocated to this period's bills (Board "
-        "efficiency KPI). **Cash received** = actual money received in this "
-        "period regardless of which month's bill it covers."
-    )
+    # If this period has no bills yet but cash has come in, explain
+    # where that money went rather than showing it as a separate,
+    # disconnected figure. The payment allocation (oldest-bill-first)
+    # already counts it toward earlier months' "Collected" totals.
+    if total_billed == 0 and cash_received > 0:
+        st.caption(
+            f"💰 UGX {cash_received:,.0f} was received in {period_label}, "
+            f"but no bills have been issued yet for this period. This "
+            f"payment has been applied to outstanding bills from earlier "
+            f"months — check those months' Collected figures."
+        )
 
     st.divider()
 
