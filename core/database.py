@@ -192,6 +192,21 @@ class Bill(Base):
     is_paid       = Column(Boolean, default=False)
     sms_sent      = Column(Boolean, default=False)
     whatsapp_sent = Column(Boolean, default=False)
+
+    # mWater reconciliation tracking
+    # mwater_id   : the _id of the billing transaction in the
+    #               mWater accounts API that created/last-updated
+    #               this bill. NULL for bills entered manually in
+    #               Maji360 (Generate bill tab) — those are never
+    #               flagged as orphaned.
+    # is_orphaned : set TRUE by sync when a bill's mwater_id can
+    #               no longer be found among current mWater
+    #               billing transactions (e.g. operator deleted
+    #               a mistaken entry). Never auto-deleted —
+    #               surfaced for manual review/confirmation.
+    mwater_id     = Column(String(100))
+    is_orphaned   = Column(Boolean, default=False)
+
     created_at    = Column(DateTime, default=datetime.utcnow)
 
     system   = relationship("WaterSystem", back_populates="bills")
@@ -214,6 +229,14 @@ class Payment(Base):
     transaction_id = Column(String)
     network        = Column(String)
     status         = Column(String, default="completed")
+
+    # mWater reconciliation tracking
+    # is_orphaned : set TRUE by sync when a payment's
+    # transaction_id can no longer be found among current
+    # mWater payment transactions. Manually recorded payments
+    # (transaction_id IS NULL) are never flagged.
+    is_orphaned    = Column(Boolean, default=False)
+
     paid_at        = Column(DateTime, default=datetime.utcnow)
     created_at     = Column(DateTime, default=datetime.utcnow)
 
