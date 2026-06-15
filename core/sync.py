@@ -1,13 +1,15 @@
-# Maji360 · core/sync.py  v2.0  — Multi-System Sync Engine
-# Key changes from v1.5:
-#   • All hardcoded GROUP_ID / WATER_SYSTEM_ID / FIELD_IDS /
-#     KR_TO_METER removed from module level.
-#   • Values are now loaded per-system from water_systems table
-#     (mwater_group_id, mwater_water_system_id, mwater_field_ids,
-#     meter_code_map) with safe fallbacks for Karungu (system 1).
-#   • accounts_base / accounts_key can be overridden per-system.
-#   • Every sync run is recorded in sync_logs.
-#   • sync_system() return dict is unchanged — all callers safe.
+# Maji360 · core/sync.py  v2.1  — Multi-System Sync Engine
+# Key changes from v2.0:
+#   • Bills and payments now store a link to their source
+#     mWater transaction (Bill.mwater_id / Payment.transaction_id).
+#   • On every sync, if a previously-synced bill/payment's source
+#     transaction can no longer be found in mWater (e.g. the
+#     operator deleted a mistaken entry), it is FLAGGED
+#     (is_orphaned = True) and logged. Nothing is ever
+#     auto-deleted — see pages/data_quality.py for manual review.
+#   • Payment allocation logic extracted into reallocate_payments()
+#     so it can be re-run after a manual orphan deletion without
+#     waiting for the next full sync.
 
 import time
 import requests
@@ -21,8 +23,8 @@ from core.database import (
     Bill, Customer, NRWRecord,
 )
 
-# ── Try importing SyncLog; graceful fallback if migration not ─
-# ── yet applied (scheduler will still work, just no log rows) ─
+# Try importing SyncLog; graceful fallback if migration not 
+# yet applied (scheduler will still work, just no log rows) 
 try:
     from core.database import SyncLog
     _SYNCLOG_AVAILABLE = True
@@ -766,10 +768,12 @@ def sync_customers(
             # match. They will be inserted correctly by the accounts
             # API sync below with their proper account codes.
             # This prevents NYA-... placeholder accounts being created.
-            if not matched_acc and                cfg.get("accounts_key") and cfg.get("accounts_base"):
+            if not matched_acc and \
+               cfg.get("accounts_key") and cfg.get("accounts_base"):
                 continue
 
-            account_no = matched_acc or                 f"{system_name[:3].upper()}-{code}"
+            account_no = matched_acc or \
+                f"{system_name[:3].upper()}-{code}"
 
             wp_type         = wp.get("type_improved") or wp.get("type_")
             connection_type = _infer_connection_type(name, wp_type)
@@ -892,6 +896,76 @@ def _sync_customers_from_accounts(
         return 0
 
 
+# reallocate_payments
+# Extracted from sync_billing so it can be called standalone
+# after a manual orphan deletion (pages/data_quality.py) without
+# re-running the whole sync.
+
+def reallocate_payments(
+    system_id: int,
+    session,
+    log:       list = None,
+    commit:    bool = True,
+) -> int:
+    """
+    Recalculate Bill.amount_paid / Bill.is_paid for every
+    customer in this system, based on the SUM of their rows
+    in the payments table (all sources — mWater-synced AND
+    manually recorded). Allocation is oldest-bill-first.
+
+    Returns the number of bill rows that changed.
+    """
+    def log_msg(msg):
+        if log is not None:
+            log.append(msg)
+
+    try:
+        pay_rows = session.execute(sql_text(
+            "SELECT customer_id, SUM(amount) "
+            "FROM payments "
+            "WHERE system_id = :sid "
+            "GROUP BY customer_id"
+        ), {"sid": system_id}).fetchall()
+        db_paid = {row[0]: float(row[1] or 0) for row in pay_rows}
+    except Exception as e:
+        log_msg(f"  Reallocation error: {e}")
+        return 0
+
+    updated   = 0
+    all_custs = session.query(Customer).filter_by(
+        system_id=system_id
+    ).all()
+
+    for customer in all_custs:
+        total_paid = db_paid.get(customer.id, 0.0)
+
+        cust_bills = session.query(Bill).filter_by(
+            system_id=system_id, customer_id=customer.id
+        ).order_by(Bill.bill_month).all()
+
+        remaining = total_paid
+        for bill in cust_bills:
+            bill_amount = bill.amount or 0
+            if remaining >= bill_amount:
+                new_paid, new_flag = bill_amount, True
+                remaining -= bill_amount
+            elif remaining > 0:
+                new_paid, new_flag = remaining, False
+                remaining = 0
+            else:
+                new_paid, new_flag = 0.0, False
+
+            if bill.amount_paid != new_paid \
+               or bill.is_paid != new_flag:
+                bill.amount_paid = new_paid
+                bill.is_paid     = new_flag
+                updated += 1
+
+    if commit:
+        session.commit()
+    return updated
+
+
 # sync_billing
 
 def sync_billing(
@@ -963,6 +1037,7 @@ def sync_billing(
         for t in billing_txns:
             cust_acc_id = t.get("customer_account", "")
             kr_code     = acc_to_kr.get(cust_acc_id, "")
+            mwater_id   = t.get("_id") or t.get("id") or ""
 
             # Look up customer — meter_code_map path first
             # (Karungu), then direct account_no fallback (NYAKABALE)
@@ -1006,13 +1081,29 @@ def sync_billing(
                     amount_paid = 0.0,
                     is_paid     = False,
                     sms_sent    = False,
+                    mwater_id   = mwater_id or None,
+                    is_orphaned = False,
                 ))
                 new_bills += 1
             else:
-                # Update if mWater has a different amount —
+                # Backfill mwater_id for bills synced before this
+                # tracking feature existed, and clear any stale
+                # orphan flag now that the transaction is present.
+                if mwater_id and existing.mwater_id != mwater_id:
+                    existing.mwater_id = mwater_id
+                if existing.is_orphaned:
+                    existing.is_orphaned = False
+                    log_msg(
+                        f"  ✓ Bill {bill_month} for "
+                        f"{customer.account_no} no longer "
+                        f"orphaned — transaction found again"
+                    )
+
+                # Update if mWater has a different amount 
                 # catches corrections made in the accounts portal.
                 # Reset amount_paid proportionally if billed changed.
-                if existing.amount != amount or                    existing.units_m3 != units_m3:
+                if existing.amount != amount or \
+                   existing.units_m3 != units_m3:
                     old_amount = existing.amount or 0
                     old_paid   = existing.amount_paid or 0
                     # Scale paid amount to new bill amount
@@ -1035,56 +1126,60 @@ def sync_billing(
         session.commit()
         log_msg(f"  New bills added: {new_bills}")
 
-        # Allocate payments across bills 
+        # Orphan detection — bills whose source transaction
+        # has disappeared from mWater (e.g. operator deleted a
+        # mistaken entry after it had already been synced).
+        # Only runs if we actually got transaction data back —
+        # an empty/failed fetch must never flag everything.
+        if all_txns:
+            current_billing_ids = {
+                t.get("_id") or t.get("id")
+                for t in billing_txns
+                if t.get("_id") or t.get("id")
+            }
+            tracked_bills = session.query(Bill).filter(
+                Bill.system_id == system_id,
+                Bill.mwater_id.isnot(None),
+                Bill.mwater_id != "",
+            ).all()
+
+            newly_orphaned = 0
+            for b in tracked_bills:
+                if b.mwater_id not in current_billing_ids:
+                    if not b.is_orphaned:
+                        cust = session.query(Customer).filter_by(
+                            id=b.customer_id
+                        ).first()
+                        log_msg(
+                            f"  🚩 Possible deletion: Bill "
+                            f"{b.bill_month} for "
+                            f"{cust.account_no if cust else '?'} "
+                            f"(amount {b.amount:,.0f}) — source "
+                            f"transaction no longer found in "
+                            f"mWater. Flagged for review."
+                        )
+                        newly_orphaned += 1
+                    b.is_orphaned = True
+
+            if newly_orphaned:
+                log_msg(
+                    f"  🚩 {newly_orphaned} bill(s) newly "
+                    f"flagged as possibly deleted in mWater "
+                    f"— review in Data Quality"
+                )
+            session.commit()
+        else:
+            log_msg(
+                "  (skipping orphan check — no transactions "
+                "returned from mWater)"
+            )
+
+        # Allocate payments across bills
         # Uses the payments TABLE (all sources: mWater-synced
         # AND manually recorded in the app). This prevents
         # manual payments being overwritten on the next sync.
         log_msg("  Recalculating payment allocation...")
-
-        try:
-            pay_rows = session.execute(sql_text(
-                "SELECT customer_id, SUM(amount) "
-                "FROM payments "
-                "WHERE system_id = :sid "
-                "GROUP BY customer_id"
-            ), {"sid": system_id}).fetchall()
-            db_paid = {row[0]: float(row[1] or 0) for row in pay_rows}
-        except Exception:
-            db_paid = {}
-
-        updated   = 0
-        all_custs = session.query(Customer).filter_by(
-            system_id=system_id
-        ).all()
-
-        for customer in all_custs:
-            total_paid = db_paid.get(customer.id, 0.0)
-            if total_paid == 0:
-                continue
-
-            cust_bills = session.query(Bill).filter_by(
-                system_id=system_id, customer_id=customer.id
-            ).order_by(Bill.bill_month).all()
-
-            remaining = total_paid
-            for bill in cust_bills:
-                bill_amount = bill.amount or 0
-                if remaining >= bill_amount:
-                    new_paid, new_flag = bill_amount, True
-                    remaining -= bill_amount
-                elif remaining > 0:
-                    new_paid, new_flag = remaining, False
-                    remaining = 0
-                else:
-                    new_paid, new_flag = 0.0, False
-
-                if bill.amount_paid != new_paid \
-                   or bill.is_paid != new_flag:
-                    bill.amount_paid = new_paid
-                    bill.is_paid     = new_flag
-                    updated += 1
-
-        session.commit()
+        updated = reallocate_payments(system_id, session, log, commit=True)
         log_msg(f"  Payment records updated: {updated}")
         return new_bills
 
@@ -1175,9 +1270,10 @@ def sync_payments(
             if not customer:
                 continue
 
-            date_str = t.get("date", "")
-            amount   = float(t.get("amount", 0))
-            notes    = t.get("notes", "") or ""
+            date_str  = t.get("date", "")
+            amount    = float(t.get("amount", 0))
+            notes     = t.get("notes", "") or ""
+            mwater_id = t.get("_id") or t.get("id") or ""
 
             if not date_str or amount <= 0:
                 continue
@@ -1191,18 +1287,21 @@ def sync_payments(
                 session.execute(sql_text("""
                     INSERT INTO payments
                         (system_id, customer_id, amount,
-                         payment_method, notes, paid_at, status)
+                         payment_method, notes, paid_at, status,
+                         transaction_id, is_orphaned)
                     VALUES
                         (:system_id, :customer_id, :amount,
                          :method, :notes,
-                         :paid_at, 'completed')
+                         :paid_at, 'completed',
+                         :transaction_id, false)
                 """), {
-                    "system_id":   system_id,
-                    "customer_id": customer.id,
-                    "amount":      amount,
-                    "method":      "Cash",
-                    "notes":       notes,
-                    "paid_at":     f"{date_only}T00:00:00+00:00",
+                    "system_id":      system_id,
+                    "customer_id":    customer.id,
+                    "amount":         amount,
+                    "method":         "Cash",
+                    "notes":          notes,
+                    "paid_at":        f"{date_only}T00:00:00+00:00",
+                    "transaction_id": mwater_id or None,
                 })
                 existing_payments.add(key)
                 new_payments += 1
@@ -1211,6 +1310,70 @@ def sync_payments(
 
         session.commit()
         log_msg(f"  New payments synced: {new_payments}")
+
+        # ── Orphan detection — payments whose source transaction ─
+        # has disappeared from mWater. Manually recorded payments
+        # (transaction_id IS NULL) are never checked here.
+        # Only runs if we actually got transaction data back.
+        if all_txns:
+            current_payment_ids = {
+                t.get("_id") or t.get("id")
+                for t in payment_txns
+                if t.get("_id") or t.get("id")
+            }
+            try:
+                tracked_rows = session.execute(sql_text(
+                    "SELECT id, transaction_id, customer_id, "
+                    "amount, is_orphaned FROM payments "
+                    "WHERE system_id = :sid "
+                    "AND transaction_id IS NOT NULL "
+                    "AND transaction_id != ''"
+                ), {"sid": system_id}).fetchall()
+            except Exception:
+                tracked_rows = []
+
+            newly_orphaned = 0
+            for row in tracked_rows:
+                pay_id, txn_id, cust_id, amount, was_orphaned = row
+                now_missing = txn_id not in current_payment_ids
+
+                if now_missing and not was_orphaned:
+                    cust = session.query(Customer).filter_by(
+                        id=cust_id
+                    ).first()
+                    log_msg(
+                        f"  🚩 Possible deletion: Payment of "
+                        f"{amount:,.0f} for "
+                        f"{cust.account_no if cust else '?'} "
+                        f"— source transaction no longer found "
+                        f"in mWater. Flagged for review."
+                    )
+                    newly_orphaned += 1
+
+                if now_missing != bool(was_orphaned):
+                    session.execute(sql_text(
+                        "UPDATE payments SET is_orphaned = :v "
+                        "WHERE id = :id"
+                    ), {"v": now_missing, "id": pay_id})
+                    if was_orphaned and not now_missing:
+                        log_msg(
+                            f"  ✓ Payment {pay_id} no longer "
+                            f"orphaned — transaction found again"
+                        )
+
+            if newly_orphaned:
+                log_msg(
+                    f"  🚩 {newly_orphaned} payment(s) newly "
+                    f"flagged as possibly deleted in mWater "
+                    f"— review in Data Quality"
+                )
+            session.commit()
+        else:
+            log_msg(
+                "  (skipping orphan check — no transactions "
+                "returned from mWater)"
+            )
+
         return new_payments
 
     except Exception as e:
