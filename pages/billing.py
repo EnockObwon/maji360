@@ -143,19 +143,17 @@ def show():
         prev_b     = sum(b.amount      or 0 for b in prev_bills)
         prev_paid  = sum(b.amount_paid or 0 for b in prev_bills)
         prev_rate  = round((prev_paid / prev_b) * 100, 1) if prev_b > 0 else 0
-        prev_cash  = _cash_received(prev_p)
         d_billed   = total_billed - prev_b
         d_paid     = total_paid   - prev_paid
         d_rate     = round(coll_rate - prev_rate, 1)
-        d_cash     = cash_received - prev_cash
         def _dfmt(v):
             if abs(v) >= 1_000_000: return f"{v/1_000_000:+.2f}M"
             if abs(v) >=    10_000: return f"{v/1_000:+.0f}K"
             return f"{v:+,.0f}"
     else:
-        d_billed = d_paid = d_rate = d_cash = None
+        d_billed = d_paid = d_rate = None
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("Total billed",    f"{currency} {total_billed:,.0f}",
                   delta=_dfmt(d_billed) if d_billed is not None else None,
@@ -169,22 +167,25 @@ def show():
     with c4:
         st.metric("Collection rate", f"{coll_rate}%",
                   delta=f"{d_rate:+.1f}pp" if d_rate is not None else None)
-    with c5:
-        st.metric("Cash received",   f"{currency} {cash_received:,.0f}",
-                  delta=_dfmt(d_cash) if d_cash is not None else None,
-                  help="Actual cash received in this period, by payment date — "
-                       "includes payments toward bills from any month.")
 
     st.caption(
         f"Showing: **{period_label}**"
         + (f" · ↑↓ vs {prev_p}" if prev_p else "")
         + " · change Year/Month above to filter"
     )
-    st.caption(
-        "💡 **Total collected** = amount allocated to this period's bills "
-        "(Board efficiency KPI). **Cash received** = actual money received "
-        "in this period regardless of which month's bill it covers."
-    )
+
+    # If this period has no bills yet but cash has come in, explain
+    # where that money went rather than showing it as a separate,
+    # disconnected figure. The payment allocation (oldest-bill-first)
+    # already counts it toward earlier months' "Total collected" totals.
+    if total_billed == 0 and cash_received > 0:
+        st.caption(
+            f"💰 UGX {cash_received:,.0f} was received in {period_label}, "
+            f"but no bills have been issued yet for this period. This "
+            f"payment has been applied to outstanding bills from earlier "
+            f"months — check those months' Total collected figures."
+        )
+
     st.divider()
 
     # Monthly aggregates 
