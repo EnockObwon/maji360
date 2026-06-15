@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
 from collections import defaultdict
+from sqlalchemy import text as sql_text
 from core.database import get_session, DailyReading, Bill, NRWRecord, Customer
 from core.auth import require_login
 
@@ -43,9 +44,26 @@ def show():
     )
     st.divider()
 
-    # Period selector 
+    # Period selector
+    # Include months that have payments even if no bills exist
+    # yet for that month — e.g. customers paying May bills in
+    # June, before June billing has been generated.
+    try:
+        pay_month_rows = session.execute(sql_text(
+            "SELECT DISTINCT TO_CHAR(paid_at, 'YYYY-MM') "
+            "FROM payments "
+            "WHERE system_id = :sid AND status = 'completed' "
+            "AND paid_at IS NOT NULL"
+        ), {"sid": system_id}).fetchall()
+        payment_months = {r[0] for r in pay_month_rows if r[0]}
+    except Exception:
+        payment_months = set()
+
+    bill_months_all = {b.bill_month for b in all_bills if b.bill_month}
+    all_period_months = bill_months_all | payment_months
+
     available_years = sorted(
-        {b.bill_month[:4] for b in all_bills if b.bill_month},
+        {m[:4] for m in all_period_months},
         reverse=True
     )
     month_names = {
@@ -72,8 +90,8 @@ def show():
             period_label    = "All time"
         else:
             year_months = sorted(
-                {b.bill_month[5:7] for b in all_bills
-                 if b.bill_month and b.bill_month[:4] == sel_year},
+                {m[5:7] for m in all_period_months
+                 if m[:4] == sel_year},
                 reverse=True
             )
             month_opts = ["All months"] + [month_names[m] for m in year_months]
@@ -98,8 +116,37 @@ def show():
     total_paid      = sum(b.amount_paid or 0 for b in period_bills)
     collection_rate = round((total_paid / total_billed) * 100, 1) if total_billed > 0 else 0
 
+    # Cash received — by actual payment date 
+    # This reflects real money movement in the period, even
+    # when no bills exist yet for that period (e.g. customers
+    # paying May bills in June, before June billing is run).
+    def _cash_received(period: str) -> float:
+        try:
+            if period == "All time":
+                row = session.execute(sql_text(
+                    "SELECT SUM(amount) FROM payments "
+                    "WHERE system_id = :sid AND status = 'completed'"
+                ), {"sid": system_id}).fetchone()
+            elif len(period) == 4:
+                row = session.execute(sql_text(
+                    "SELECT SUM(amount) FROM payments "
+                    "WHERE system_id = :sid AND status = 'completed' "
+                    "AND EXTRACT(YEAR FROM paid_at) = :yr"
+                ), {"sid": system_id, "yr": int(period)}).fetchone()
+            else:
+                row = session.execute(sql_text(
+                    "SELECT SUM(amount) FROM payments "
+                    "WHERE system_id = :sid AND status = 'completed' "
+                    "AND TO_CHAR(paid_at, 'YYYY-MM') = :period"
+                ), {"sid": system_id, "period": period}).fetchone()
+            return float(row[0] or 0)
+        except Exception:
+            return 0.0
+
+    cash_received = _cash_received(selected_period)
+
     # Previous period for deltas 
-    sorted_months = sorted({b.bill_month for b in all_bills if b.bill_month})
+    sorted_months = sorted(all_period_months)
     if selected_period not in (None, "All time") and len(selected_period) == 7:
         idx = sorted_months.index(selected_period) if selected_period in sorted_months else -1
         if idx > 0:
@@ -108,10 +155,11 @@ def show():
             prev_billed = sum(b.amount      or 0 for b in prev_bills)
             prev_paid   = sum(b.amount_paid or 0 for b in prev_bills)
             prev_rate   = round((prev_paid / prev_billed) * 100, 1) if prev_billed > 0 else 0
+            prev_cash   = _cash_received(prev_month)
         else:
-            prev_billed = prev_paid = prev_rate = None
+            prev_billed = prev_paid = prev_rate = prev_cash = None
     else:
-        prev_billed = prev_paid = prev_rate = None
+        prev_billed = prev_paid = prev_rate = prev_cash = None
 
     def _delta(curr, prev):
         if prev is None or prev == 0:
@@ -184,7 +232,7 @@ def show():
     else:
         st.info("No readings synced yet for this system.")
 
-    # KPI cards with delta arrows 
+    # KPI cards with delta arrows
     st.markdown(
         f"### System overview "
         f"<span style='font-size:14px;font-weight:400;color:#64748b'>"
@@ -197,10 +245,10 @@ def show():
         if val >= 10_000:    return f"{currency} {val/1_000:.0f}K"
         return f"{currency} {val:,.0f}"
 
-    nrw_pct     = latest_nrw.nrw_percent if latest_nrw else None
-    prev_nrw_pct = prev_nrw.nrw_percent  if prev_nrw  else None
+    nrw_pct      = latest_nrw.nrw_percent if latest_nrw else None
+    prev_nrw_pct = prev_nrw.nrw_percent   if prev_nrw  else None
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
         nrw_delta = _delta(nrw_pct, prev_nrw_pct) if nrw_pct and prev_nrw_pct else None
         st.metric("NRW rate",        f"{nrw_pct:.1f}%" if nrw_pct else "—", delta=nrw_delta,
@@ -216,6 +264,17 @@ def show():
     with c5:
         st.metric("Collection rate", f"{collection_rate}%",
                   delta=_delta(collection_rate, prev_rate) if prev_rate else None)
+    with c6:
+        st.metric("Cash received",   _fmt(cash_received),
+                  delta=_delta(cash_received, prev_cash) if prev_cash else None,
+                  help="Actual cash received in this period, by payment date — "
+                       "includes payments toward bills from any month.")
+
+    st.caption(
+        "💡 **Collected** = amount allocated to this period's bills (Board "
+        "efficiency KPI). **Cash received** = actual money received in this "
+        "period regardless of which month's bill it covers."
+    )
 
     st.divider()
 
