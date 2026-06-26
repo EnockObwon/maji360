@@ -213,37 +213,40 @@ def show_login():
         st.markdown(
             "<div style='text-align:center; margin-top:2rem;"
             "font-size:12px; color:#94a3b8'>"
-            "Maji360 v1.7.0 · Sub-Saharan Africa</div>",
+            "Maji360 v1.7.1 · Sub-Saharan Africa</div>",
             unsafe_allow_html=True
         )
 
 
-def show_mobile_nav(current_page: str, user: dict, systems: list):
+def _build_pages(role: str) -> dict:
     """
-    Mobile navigation bar rendered inside main content.
-    Has its own system selector that stays in sync with the
-    sidebar via on_change callbacks — both write to the same
-    session state keys so neither can override the other.
+    Single source of truth for page labels → keys.
+    Used by both sidebar and mobile nav so they stay in sync.
     """
-    role = user.get("role", "viewer")
-
     pages = {
-        "🏠 Home":             "Home",
-        "📉 NRW Report":       "NRW",
-        "💰 Billing":          "Billing",
-        "📊 Financial":        "Financial",
-        "📄 Reports":          "Reports",
-        "⚙️ Operations":       "Operations",
-        "📋 Field Ops":        "FieldOps",
-        "💵 Customer Billing": "CustomerBilling",
-        "🔧 Maintenance":      "Maintenance",
-        "🗺️ Map":              "Map",
-        "🔄 Sync":             "Sync",
+        "🏠  Home":             "Home",
+        "📉  NRW Report":       "NRW",
+        "💰  Billing":          "Billing",
+        "📊  Financial":        "Financial",
+        "📄  Reports":          "Reports",
+        "⚙️  Operations":       "Operations",
+        "📋  Field Ops":        "FieldOps",
+        "💵  Customer Billing": "CustomerBilling",
+        "🔧  Maintenance":      "Maintenance",
+        "🗺️  Map":              "Map",
+        "🔄  Sync":             "Sync",
     }
     if role in ["super_admin", "system_admin"]:
-        pages["🔩 System Setup"] = "SystemSetup"
+        pages["🔩  System Setup"]  = "SystemSetup"
+        pages["🩺  Data Quality"]  = "DataQuality"
     if role == "super_admin":
-        pages["👑 Admin"] = "Admin"
+        pages["👑  Admin"] = "Admin"
+    return pages
+
+
+def show_mobile_nav(current_page: str, user: dict, systems: list):
+    role  = user.get("role", "viewer")
+    pages = _build_pages(role)
 
     st.markdown(
         f"<div class='mobile-topnav'>"
@@ -261,15 +264,11 @@ def show_mobile_nav(current_page: str, user: dict, systems: list):
         if current not in sys_names:
             current = sys_names[0]
 
-        # Callback: mobile changed → update session state AND
-        # sync the sidebar widget so it shows the same choice.
         def on_mobile_sys_change():
             name = st.session_state.get("mobile_sys_select", "")
             _apply_system(systems, name)
             st.session_state["sys_selector"] = name
 
-        # Sync mobile widget to current selection before rendering.
-        # This propagates sidebar changes into the mobile selectbox.
         st.session_state["mobile_sys_select"] = current
         st.selectbox(
             "System",
@@ -346,15 +345,11 @@ def show_sidebar():
             if current not in sys_names:
                 current = sys_names[0]
 
-            # Callback: sidebar changed → update session state AND
-            # sync the mobile widget so it shows the same choice.
             def on_sidebar_sys_change():
                 name = st.session_state.get("sys_selector", "")
                 _apply_system(systems, name)
                 st.session_state["mobile_sys_select"] = name
 
-            # Sync sidebar widget to current selection before rendering.
-            # This propagates mobile changes into the sidebar selectbox.
             st.session_state["sys_selector"] = current
             st.selectbox(
                 "Water system",
@@ -363,30 +358,13 @@ def show_sidebar():
                 on_change = on_sidebar_sys_change
             )
 
-            # Ensure session state is initialised on first render
-            # (callbacks only fire on user interaction, not on load).
             if not st.session_state.get("selected_system_id"):
                 _apply_system(systems, current)
 
         st.divider()
 
-        pages = {
-            "🏠  Home":             "Home",
-            "📉  NRW Report":       "NRW",
-            "💰  Billing":          "Billing",
-            "📊  Financial":        "Financial",
-            "📄  Reports":          "Reports",
-            "⚙️  Operations":       "Operations",
-            "📋  Field Ops":        "FieldOps",
-            "💵  Customer Billing": "CustomerBilling",
-            "🔧  Maintenance":      "Maintenance",
-            "🗺️  Map":              "Map",
-            "🔄  Sync":             "Sync",
-        }
-        if user.get("role") in ["super_admin", "system_admin"]:
-            pages["🔩  System Setup"] = "SystemSetup"
-        if user.get("role") == "super_admin":
-            pages["👑  Admin"] = "Admin"
+        role  = user.get("role", "viewer")
+        pages = _build_pages(role)
 
         current_page = st.session_state.get("page", "Home")
 
@@ -455,6 +433,9 @@ else:
         show()
     elif page == "SystemSetup":
         from pages.system_setup import show
+        show()
+    elif page == "DataQuality":
+        from pages.data_quality import show
         show()
     elif page == "Admin":
         from pages.admin import show
