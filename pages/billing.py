@@ -46,8 +46,10 @@ def show():
                 "is_paid":     b.is_paid,
             } for b in c_bills]
         }
-    # Cash received by payment date (month) — fetched while
-    # session is open so it's available after session.close().
+
+    # Cash received by payment date — this is now the primary
+    # "Collected" figure throughout the page (Option A).
+    # It matches what mWater shows and what the Board expects.
     try:
         cash_rows = session.execute(sql_text(
             "SELECT TO_CHAR(paid_at, 'YYYY-MM') AS pm, SUM(amount) "
@@ -67,9 +69,6 @@ def show():
         return
 
     # Period selector 
-    # Include months that have payments even if no bills exist
-    # yet for that month — e.g. customers paying May bills in
-    # June, before June billing has been generated.
     bill_months_all   = {b.bill_month for b in all_bills if b.bill_month}
     payment_months    = set(cash_by_month.keys())
     all_period_months = bill_months_all | payment_months
@@ -115,6 +114,7 @@ def show():
     period_bills = _subset(sel_period)
 
     def _cash_received(period):
+        """Cash received in this period by payment date."""
         if period == "All time":
             return sum(cash_by_month.values())
         if len(period) == 4:
@@ -123,12 +123,18 @@ def show():
 
     cash_received = _cash_received(sel_period)
 
-    # KPI totals + delta 
-    total_billed      = sum(b.amount      or 0 for b in period_bills)
-    total_paid        = sum(b.amount_paid or 0 for b in period_bills)
-    total_outstanding = total_billed - total_paid
-    coll_rate         = round((total_paid / total_billed) * 100, 1) if total_billed > 0 else 0
+    # KPI totals 
+    # "Collected" and "Collection rate" now use actual cash
+    # received by payment date (Option A — matches mWater).
+    # "Outstanding" = billed − cash received.
+    # The FIFO allocation on bills (amount_paid) is still used
+    # for the per-customer balances table and outstanding bar
+    # chart — those need the debt position, not cash flow.
+    total_billed      = sum(b.amount or 0 for b in period_bills)
+    total_outstanding = total_billed - cash_received
+    coll_rate         = round((cash_received / total_billed) * 100, 1) if total_billed > 0 else 0
 
+    # Previous period for delta arrows
     sorted_months = sorted(all_period_months)
 
     def _prev(period):
@@ -139,70 +145,62 @@ def show():
 
     prev_p = _prev(sel_period)
     if prev_p:
-        prev_bills = _subset(prev_p)
-        prev_b     = sum(b.amount      or 0 for b in prev_bills)
-        prev_paid  = sum(b.amount_paid or 0 for b in prev_bills)
-        prev_rate  = round((prev_paid / prev_b) * 100, 1) if prev_b > 0 else 0
-        d_billed   = total_billed - prev_b
-        d_paid     = total_paid   - prev_paid
-        d_rate     = round(coll_rate - prev_rate, 1)
+        prev_bills        = _subset(prev_p)
+        prev_b            = sum(b.amount or 0 for b in prev_bills)
+        prev_cash         = _cash_received(prev_p)
+        prev_outstanding  = prev_b - prev_cash
+        prev_rate         = round((prev_cash / prev_b) * 100, 1) if prev_b > 0 else 0
+        d_billed          = total_billed      - prev_b
+        d_collected       = cash_received     - prev_cash
+        d_outstanding     = total_outstanding - prev_outstanding
+        d_rate            = round(coll_rate   - prev_rate, 1)
         def _dfmt(v):
             if abs(v) >= 1_000_000: return f"{v/1_000_000:+.2f}M"
             if abs(v) >=    10_000: return f"{v/1_000:+.0f}K"
             return f"{v:+,.0f}"
     else:
-        d_billed = d_paid = d_rate = None
+        d_billed = d_collected = d_outstanding = d_rate = None
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("Total billed",    f"{currency} {total_billed:,.0f}",
+        st.metric("Total billed",
+                  f"{currency} {total_billed:,.0f}",
                   delta=_dfmt(d_billed) if d_billed is not None else None,
                   delta_color="off")
     with c2:
-        st.metric("Total collected", f"{currency} {total_paid:,.0f}",
-                  delta=_dfmt(d_paid) if d_paid is not None else None)
+        st.metric("Total collected",
+                  f"{currency} {cash_received:,.0f}",
+                  delta=_dfmt(d_collected) if d_collected is not None else None)
     with c3:
-        st.metric("Outstanding",     f"{currency} {total_outstanding:,.0f}",
-                  delta_color="off")
+        st.metric("Outstanding",
+                  f"{currency} {total_outstanding:,.0f}",
+                  delta=_dfmt(d_outstanding) if d_outstanding is not None else None,
+                  delta_color="inverse")
     with c4:
-        st.metric("Collection rate", f"{coll_rate}%",
+        st.metric("Collection rate",
+                  f"{coll_rate}%",
                   delta=f"{d_rate:+.1f}pp" if d_rate is not None else None)
 
     st.caption(
         f"Showing: **{period_label}**"
         + (f" · ↑↓ vs {prev_p}" if prev_p else "")
-        + " · change Year/Month above to filter"
+        + " · Collected = cash received by payment date, matching mWater"
     )
-
-    # If this period has no bills yet but cash has come in, explain
-    # where that money went rather than showing it as a separate,
-    # disconnected figure. The payment allocation (oldest-bill-first)
-    # already counts it toward earlier months' "Total collected" totals.
-    if total_billed == 0 and cash_received > 0:
-        st.caption(
-            f"💰 UGX {cash_received:,.0f} was received in {period_label}, "
-            f"but no bills have been issued yet for this period. This "
-            f"payment has been applied to outstanding bills from earlier "
-            f"months — check those months' Total collected figures."
-        )
-
     st.divider()
 
     # Monthly aggregates 
-    monthly_billed    = defaultdict(float)
-    monthly_collected = defaultdict(float)
+    monthly_billed = defaultdict(float)
     for b in all_bills:
         if b.bill_month:
-            monthly_billed[b.bill_month]    += b.amount      or 0
-            monthly_collected[b.bill_month] += b.amount_paid or 0
+            monthly_billed[b.bill_month] += b.amount or 0
 
     if sel_period != "All time":
-        all_months = [sel_period] if sel_period in monthly_billed else []
+        all_months = [sel_period] if sel_period in monthly_billed or sel_period in cash_by_month else []
     else:
-        all_months = sorted(monthly_billed.keys())
+        all_months = sorted(set(monthly_billed.keys()) | set(cash_by_month.keys()))
 
-    billed_vals      = [monthly_billed.get(m, 0)    for m in all_months]
-    collected_vals   = [monthly_collected.get(m, 0) for m in all_months]
+    billed_vals      = [monthly_billed.get(m, 0)  for m in all_months]
+    collected_vals   = [cash_by_month.get(m, 0)   for m in all_months]  # Option A: payment date
     outstanding_vals = [max(0, b - c) for b, c in zip(billed_vals, collected_vals)]
     rates            = [
         round((c / b) * 100, 1) if b > 0 else 0
@@ -212,8 +210,8 @@ def show():
     # Chart 1: Cash collected by month 
     st.markdown("### Cash collected by month")
     st.caption(
-        "Green = collected against that month's bills · "
-        "Pink = bills issued but not yet paid · % = collection rate"
+        "Green = cash received in that month · "
+        "Pink = billed but not yet received · % = collection rate"
     )
     fig1 = go.Figure()
     fig1.add_trace(go.Bar(
@@ -223,7 +221,7 @@ def show():
         textposition="inside", textfont=dict(color="white", size=11)
     ))
     fig1.add_trace(go.Bar(
-        name="Outstanding bills", x=all_months, y=outstanding_vals,
+        name="Outstanding", x=all_months, y=outstanding_vals,
         marker_color="#fca5a5"
     ))
     fig1.update_layout(
@@ -268,7 +266,7 @@ def show():
 
     # Chart 3: Monthly revenue trend 
     st.markdown("### Monthly revenue trend")
-    st.caption("Blue = bills issued · Green = collected against those bills")
+    st.caption("Blue = bills issued · Green = cash received in that month")
     fig3 = go.Figure()
     fig3.add_trace(go.Scatter(
         name="Billed", x=all_months, y=billed_vals,
@@ -292,6 +290,8 @@ def show():
     st.divider()
 
     # Customer account balances table 
+    # Uses FIFO allocation (amount_paid) for the per-customer
+    # outstanding position — this is correct for debt tracking.
     st.markdown("### Customer account balances")
     rows = []
     for cid, info in cust_bill_map.items():
@@ -314,12 +314,11 @@ def show():
     # Monthly cash flow summary table 
     st.markdown("### Monthly cash flow summary")
     st.caption(
-        "Billed/Collected = bills issued vs amount allocated to those "
-        "bills (bill-month basis). Cash received = actual payments by "
-        "payment date — may show activity for months not yet billed."
+        "Billed = bills issued that month. "
+        "Collected = cash received by payment date (matches mWater). "
+        "Rate = cash received ÷ billed."
     )
 
-    # Include months that have payments but no bills yet
     if sel_period == "All time":
         flow_months = sorted(set(monthly_billed.keys()) | set(cash_by_month.keys()))
     elif len(sel_period) == 4:
@@ -332,15 +331,14 @@ def show():
 
     flow_rows = []
     for m in flow_months:
-        b = monthly_billed.get(m, 0)
-        c = monthly_collected.get(m, 0)
+        b    = monthly_billed.get(m, 0)
         cash = cash_by_month.get(m, 0)
+        rate = round((cash / b) * 100, 1) if b > 0 else 0
         flow_rows.append({
-            "Month":         m,
-            "Billed":        f"{currency} {b:,.0f}" if b > 0 else "—",
-            "Collected":     f"{currency} {c:,.0f}" if b > 0 else "—",
-            "Rate":          f"{round((c/b)*100,1) if b>0 else 0}%" if b > 0 else "—",
-            "Cash received": f"{currency} {cash:,.0f}",
+            "Month":     m,
+            "Billed":    f"{currency} {b:,.0f}"    if b    > 0 else "—",
+            "Collected": f"{currency} {cash:,.0f}" if cash > 0 else "—",
+            "Rate":      f"{rate}%"                if b    > 0 else "—",
         })
     if flow_rows:
         st.dataframe(pd.DataFrame(flow_rows), use_container_width=True, hide_index=True)
