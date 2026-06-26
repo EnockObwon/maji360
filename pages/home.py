@@ -43,7 +43,7 @@ def show():
     )
     st.divider()
 
-    # Period selector 
+    # Period selector
     try:
         pay_month_rows = session.execute(sql_text(
             "SELECT DISTINCT TO_CHAR(paid_at, 'YYYY-MM') "
@@ -158,7 +158,7 @@ def show():
             return f"{diff:+.1f}%"
         return f"{diff:+,.0f}"
 
-    # NRW 
+    # NRW
     nrw_q = session.query(NRWRecord).filter(
         NRWRecord.system_id == system_id, NRWRecord.water_produced > 0
     )
@@ -179,7 +179,7 @@ def show():
                 NRWRecord.month     == sorted_months[idx - 1]
             ).first()
 
-    # ── Outstanding balances (FIFO — correct for debt position)
+    # Outstanding balances (FIFO — correct for debt position)
     customers = session.query(Customer).filter_by(system_id=system_id, is_active=True).all()
     outstanding_data = []
     for c in customers:
