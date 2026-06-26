@@ -28,7 +28,7 @@ except ImportError:
     _SYNCLOG_AVAILABLE = False
 
 
-# Karungu (system 1) fallback constants 
+# Karungu (system 1) fallback constants
 # Used ONLY when the corresponding column on water_systems
 # is NULL. New systems must have their values set in the DB.
 
@@ -105,7 +105,7 @@ def _infer_connection_type(name: str, wp_type: str = None) -> str:
     return "PSP"
 
 
-# Config helpers 
+# Config helpers
 
 def get_mwater_config(system: WaterSystem = None) -> dict:
     try:
@@ -390,6 +390,14 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         log_msg("Syncing payments...")
         new_payments = sync_payments(system_id, session, cfg, sys_cfg, log)
         log_msg(f"New payments      : {new_payments}")
+
+        # Re-run allocation after payments are synced so that
+        # bills created in this same run get correctly allocated
+        # in a single sync rather than requiring two runs.
+        if new_payments > 0:
+            log_msg("Re-allocating after new payments...")
+            updated = reallocate_payments(system_id, session, log, commit=True)
+            log_msg(f"  Payment records updated: {updated}")
 
         log_msg("Syncing expenses...")
         new_expenses = sync_expenses(system_id, session, cfg, log)
@@ -1109,7 +1117,7 @@ def recalculate_nrw(system_id: int, session) -> None:
     session.commit()
 
 
-# _fetch_all_transactions
+# _fetch_all_transactions 
 
 def _fetch_all_transactions(accounts_base: str, accounts_key: str) -> list[dict]:
     all_txns: list[dict] = []
