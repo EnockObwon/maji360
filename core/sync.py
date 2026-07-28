@@ -1,13 +1,9 @@
-# Maji360 · core/sync.py  v2.2  — Multi-System Sync Engine
-# Changes from v2.1:
-#   • KR11-KR14 added to _DEFAULT_METER_CODE_MAP so billing
-#     lookup uses meter_no path (reliable) for new customers.
-#   • acc_name_to_code now built from customer_accounts (r2)
-#     joined to customers (r3), giving 433xxx account codes
-#     instead of KR codes for newly-synced customers.
-#   • sync_payments backfills transaction_id on pre-existing
-#     payments (synced before v2.1) so orphan detection works
-#     for them on future syncs.
+# Maji360 · core/sync.py  v2.3  — Multi-System Sync Engine
+# Changes from v2.2:
+#   • Auto-update meter_code_map: when a new water point is
+#     found that isn't in the map, its KR code and meter serial
+#     are added to water_systems.meter_code_map automatically.
+#     No more manual SQL updates when new customers are added.
 
 import time
 import requests
@@ -28,9 +24,7 @@ except ImportError:
     _SYNCLOG_AVAILABLE = False
 
 
-# Karungu (system 1) fallback constants
-# Used ONLY when the corresponding column on water_systems
-# is NULL. New systems must have their values set in the DB.
+# Karungu (system 1) fallback constants 
 
 _DEFAULT_GROUP_ID        = "718ce61fbf4f4742bd1018cabf90d1e8"
 _DEFAULT_WATER_SYSTEM_ID = "b0e76a15-7047-4c5e-a986-e2bba550a4ff"
@@ -42,9 +36,6 @@ _DEFAULT_FIELD_IDS = {
     "tank_end":   "9cae2fe4ea6b4940bb800253123b7565",
 }
 
-# FIX 1: Added KR11-KR14 so billing lookup uses meter_no
-# path for new customers (reliable) rather than account_no
-# fallback which previously returned KR-format codes.
 _DEFAULT_METER_CODE_MAP = {
     "KR1":  "659279453",
     "KR2":  "659279460",
@@ -70,42 +61,27 @@ CONN_TYPE_MAP = {
 
 
 def _infer_connection_type(name: str, wp_type: str = None) -> str:
-    """
-    Determine connection type from mWater water point type field
-    (preferred) or by keyword-matching the customer name.
-
-    Returns one of: "PSP" | "Private" | "School" | "Institution"
-    These match the DHIS2 Uganda Water Sector reporting categories
-    and the values expected by reports.py.
-    """
     if wp_type and wp_type in CONN_TYPE_MAP:
         return CONN_TYPE_MAP[wp_type]
-
     n = name.lower()
-
     if any(w in n for w in ["school", "p/s", "nursery", "kindergarten"]):
         return "School"
-
     if any(w in n for w in [
-        "church", "cou", "catholic", "mosque",
-        "hospital", "clinic", "health centre",
-        "lodge", "market", "trading centre"
+        "church", "cou", "catholic", "mosque", "hospital",
+        "clinic", "health centre", "lodge", "market", "trading centre"
     ]):
         return "Institution"
-
     if any(w in n for w in [
-        "psp", "public stand", "stand post",
-        "public tap", "main public", "tap stand", "pump house"
+        "psp", "public stand", "stand post", "public tap",
+        "main public", "tap stand", "pump house"
     ]):
         return "PSP"
-
     if any(w in n for w in ["private", "yard tap", "residence", "house", "home"]):
         return "Private"
-
     return "PSP"
 
 
-# Config helpers
+# Config helpers 
 
 def get_mwater_config(system: WaterSystem = None) -> dict:
     try:
@@ -124,13 +100,11 @@ def get_mwater_config(system: WaterSystem = None) -> dict:
             "accounts_key":  os.environ.get("ACCOUNTS_CLIENT_KEY", ""),
             "accounts_base": os.environ.get("ACCOUNTS_BASE", ""),
         }
-
     if system:
         if getattr(system, "accounts_base", None):
             base_cfg["accounts_base"] = system.accounts_base
         if getattr(system, "accounts_key", None):
             base_cfg["accounts_key"] = system.accounts_key
-
     return base_cfg
 
 
@@ -146,11 +120,11 @@ def safe_float(val) -> float | None:
 
 
 def _get_system_config(system: WaterSystem) -> dict:
-    group_id = getattr(system, "mwater_group_id", None) or _DEFAULT_GROUP_ID
+    group_id        = getattr(system, "mwater_group_id", None)        or _DEFAULT_GROUP_ID
     water_system_id = getattr(system, "mwater_water_system_id", None) or _DEFAULT_WATER_SYSTEM_ID
-    field_ids = getattr(system, "mwater_field_ids", None) or _DEFAULT_FIELD_IDS
-    _raw_map  = getattr(system, "meter_code_map", None)
-    meter_code_map = _DEFAULT_METER_CODE_MAP if _raw_map is None else _raw_map
+    field_ids       = getattr(system, "mwater_field_ids", None)        or _DEFAULT_FIELD_IDS
+    _raw_map        = getattr(system, "meter_code_map", None)
+    meter_code_map  = _DEFAULT_METER_CODE_MAP if _raw_map is None else _raw_map
     return {
         "group_id":        group_id,
         "water_system_id": water_system_id,
@@ -169,7 +143,6 @@ def get_last_end_readings(system_id: int, session) -> tuple[float | None, float 
         last_pump_end = float(pump_row[0]) if pump_row else None
     except Exception:
         last_pump_end = None
-
     try:
         tank_row = session.execute(sql_text(
             "SELECT tank_end_reading FROM daily_readings "
@@ -179,7 +152,6 @@ def get_last_end_readings(system_id: int, session) -> tuple[float | None, float 
         last_tank_end = float(tank_row[0]) if tank_row else None
     except Exception:
         last_tank_end = None
-
     return last_pump_end, last_tank_end
 
 
@@ -255,7 +227,6 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         log_msg("Fetching mWater responses...")
         all_responses = []
         skip = 0
-
         while True:
             try:
                 resp = requests.get(
@@ -263,8 +234,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                     params={
                         "client":   cfg["client_key"],
                         "selector": json.dumps({"form": form_id}),
-                        "limit": 100,
-                        "skip":  skip,
+                        "limit": 100, "skip": skip,
                     },
                     timeout=60,
                 )
@@ -360,15 +330,10 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 continue
 
             session.add(DailyReading(
-                system_id          = system_id,
-                reading_date       = reading_date,
-                water_produced_m3  = pumped,
-                water_consumed_m3  = consumed,
-                water_sold_m3      = 0.0,
-                pump_end_reading   = pe,
-                tank_end_reading   = te,
-                mwater_response_id = resp_id,
-                synced_at          = datetime.now(timezone.utc),
+                system_id=system_id, reading_date=reading_date,
+                water_produced_m3=pumped, water_consumed_m3=consumed,
+                water_sold_m3=0.0, pump_end_reading=pe, tank_end_reading=te,
+                mwater_response_id=resp_id, synced_at=datetime.now(timezone.utc),
             ))
             existing_ids.add(resp_id)
             if pumped   > 0: new_pump += 1
@@ -391,9 +356,8 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         new_payments = sync_payments(system_id, session, cfg, sys_cfg, log)
         log_msg(f"New payments      : {new_payments}")
 
-        # Re-run allocation after payments are synced so that
-        # bills created in this same run get correctly allocated
-        # in a single sync rather than requiring two runs.
+        # Re-run allocation after payments so bills created in this
+        # same run are correctly allocated without needing a second sync.
         if new_payments > 0:
             log_msg("Re-allocating after new payments...")
             updated = reallocate_payments(system_id, session, log, commit=True)
@@ -498,6 +462,8 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
         meter_code_map   = sys_cfg["meter_code_map"]
         meter_to_account = {}
         acc_name_to_code = {}
+        r2_data = []
+        r3_data = []
 
         if cfg.get("accounts_key") and cfg.get("accounts_base"):
             try:
@@ -525,10 +491,7 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
                         if meter_no and acc_code:
                             meter_to_account[meter_no] = acc_code
 
-                    # FIX 2: Build name → 433xxx account code by joining
-                    # r2 (customer_accounts, has 433xxx codes) with r3
-                    # (customers, has names). Previously used r3 alone
-                    # which gave KR codes — causing KR12/KR13 account_nos.
+                    # Build name → 433xxx account code (not KR code)
                     cust_id_to_name = {
                         c["_id"]: (c.get("name") or "").lower().strip()
                         for c in r3_data
@@ -541,6 +504,64 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
                             acc_name_to_code[name] = acc_code
 
                     log_msg(f"  Accounts name index: {len(acc_name_to_code)} entries")
+
+                    # Auto-update meter_code_map 
+                    # If a water point's KR code is not yet in
+                    # meter_code_map, detect it via name match and add
+                    # it to water_systems.meter_code_map automatically.
+                    # No manual SQL needed when new customers are added.
+                    new_map_entries = {}
+                    existing_meter_serials = set(meter_code_map.values())
+
+                    for wp in wps_for_system:
+                        wp_code     = str(wp.get("code", ""))
+                        wp_name     = wp.get("name", "")
+                        if isinstance(wp_name, dict):
+                            wp_name = wp_name.get("en", "")
+                        wp_name_key = (wp_name or "").lower().strip()
+
+                        # Skip if already in the map
+                        if wp_code in existing_meter_serials:
+                            continue
+
+                        # Find matching KR code via name in accounts
+                        for c in r3_data:
+                            c_name = (c.get("name") or "").lower().strip()
+                            kr     = c.get("code", "")
+                            if c_name == wp_name_key and kr and kr not in meter_code_map:
+                                new_map_entries[kr] = wp_code
+                                log_msg(f"  📍 Auto-mapping {kr} → {wp_code} ({wp_name})")
+                                break
+
+                    if new_map_entries:
+                        try:
+                            merged = {**meter_code_map, **new_map_entries}
+                            session.execute(sql_text(
+                                "UPDATE water_systems "
+                                "SET meter_code_map = :m::jsonb "
+                                "WHERE id = :sid"
+                            ), {"m": json.dumps(merged), "sid": system_id})
+                            session.commit()
+                            # Update local copies so billing sync
+                            # uses the new map in the same run
+                            meter_code_map.update(new_map_entries)
+                            sys_cfg["meter_code_map"] = meter_code_map
+                            existing_meter_serials    = set(meter_code_map.values())
+                            log_msg(
+                                f"  ✓ meter_code_map updated with "
+                                f"{len(new_map_entries)} new entry(ies)"
+                            )
+                            # Rebuild meter_to_account with new entries
+                            for kr, meter_no in new_map_entries.items():
+                                for ca in r2_data:
+                                    cust_id  = ca.get("customer", "")
+                                    kr_code  = mw_customers.get(cust_id, "")
+                                    acc_code = ca.get("code", "")
+                                    if kr_code == kr and meter_no and acc_code:
+                                        meter_to_account[meter_no] = acc_code
+                        except Exception as e:
+                            log_msg(f"  ⚠ Could not update meter_code_map: {e}")
+
             except Exception as e:
                 log_msg(f"  Accounts lookup error: {e}")
 
@@ -626,7 +647,6 @@ def _sync_customers_from_accounts(system_id, session, cfg, log, water_system_id=
             name = (c.get("name") or f"Customer {code}").strip()
             if not code or code in existing_accounts:
                 continue
-
             session.add(Customer(
                 system_id=system_id, name=name, account_no=code,
                 meter_no=code, connection_type=_infer_connection_type(name),
@@ -694,7 +714,7 @@ def reallocate_payments(system_id: int, session, log: list = None, commit: bool 
     return updated
 
 
-# sync_billing 
+# sync_billing
 
 def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
 
@@ -734,9 +754,13 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
             meter_no = meter_code_map.get(kr_code)
             customer = None
             if meter_no:
-                customer = session.query(Customer).filter_by(system_id=system_id, meter_no=meter_no).first()
+                customer = session.query(Customer).filter_by(
+                    system_id=system_id, meter_no=meter_no
+                ).first()
             if not customer and kr_code:
-                customer = session.query(Customer).filter_by(system_id=system_id, account_no=kr_code).first()
+                customer = session.query(Customer).filter_by(
+                    system_id=system_id, account_no=kr_code
+                ).first()
             if not customer:
                 log_msg(f"  ⚠ Unmatched billing txn: acc={cust_acc_id} code={kr_code} amount={t.get('amount',0)}")
                 continue
@@ -780,8 +804,12 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
 
         # Orphan detection 
         if all_txns:
-            current_billing_ids = {t.get("_id") or t.get("id") for t in billing_txns if t.get("_id") or t.get("id")}
-            tracked_bills       = session.query(Bill).filter(
+            current_billing_ids = {
+                t.get("_id") or t.get("id")
+                for t in billing_txns
+                if t.get("_id") or t.get("id")
+            }
+            tracked_bills = session.query(Bill).filter(
                 Bill.system_id == system_id,
                 Bill.mwater_id.isnot(None),
                 Bill.mwater_id != "",
@@ -908,11 +936,7 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
         session.commit()
         log_msg(f"  New payments synced: {new_payments}")
 
-        # FIX 3: Backfill transaction_id for pre-existing payments
-        # (synced before v2.1 when tracking was added). Match by
-        # (customer_id, amount, date) to current mWater transactions.
-        # After one sync, all payments still in mWater will have
-        # transaction_id set, so orphan detection works for them.
+        # Backfill transaction_id for pre-existing payments
         if payment_txns:
             backfilled = 0
             for t in payment_txns:
@@ -935,22 +959,18 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
                     continue
 
                 try:
-                    r2 = session.execute(sql_text("""
-                        UPDATE payments
-                        SET transaction_id = :txn_id
+                    res2 = session.execute(sql_text("""
+                        UPDATE payments SET transaction_id = :txn_id
                         WHERE system_id   = :sid
                           AND customer_id = :cid
                           AND amount      = :amount
                           AND DATE(paid_at) = :date
                           AND (transaction_id IS NULL OR transaction_id = '')
                     """), {
-                        "txn_id": mwater_id2,
-                        "sid":    system_id,
-                        "cid":    cust2.id,
-                        "amount": amount2,
-                        "date":   date_only2,
+                        "txn_id": mwater_id2, "sid": system_id,
+                        "cid": cust2.id, "amount": amount2, "date": date_only2,
                     })
-                    backfilled += r2.rowcount
+                    backfilled += res2.rowcount
                 except Exception:
                     pass
 
@@ -1060,13 +1080,9 @@ def sync_expenses(system_id, session, cfg, log) -> int:
                     VALUES (:system_id, :date, :month, :amount, :category, :notes, :mwater_id)
                     ON CONFLICT (mwater_id) DO NOTHING
                 """), {
-                    "system_id": system_id,
-                    "date":      date_str,
-                    "month":     month,
-                    "amount":    float(t.get("amount", 0)),
-                    "category":  category,
-                    "notes":     t.get("notes", ""),
-                    "mwater_id": mwater_id,
+                    "system_id": system_id, "date": date_str, "month": month,
+                    "amount": float(t.get("amount", 0)), "category": category,
+                    "notes": t.get("notes", ""), "mwater_id": mwater_id,
                 })
                 new_expenses += 1
                 existing.add(mwater_id)
