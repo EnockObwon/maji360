@@ -513,9 +513,18 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
                     # If a water point's KR code is not yet in
                     # meter_code_map, detect it via name match and add
                     # it to water_systems.meter_code_map automatically.
-                    # No manual SQL needed when new customers are added.
+                    # Uses partial/contains matching to handle cases
+                    # where water point names have extra words vs the
+                    # accounts customer name (e.g. "John Doe Private
+                    # Connection" vs "John Doe").
                     new_map_entries = {}
                     existing_meter_serials = set(meter_code_map.values())
+
+                    # Build unmapped accounts customers for matching
+                    unmapped_accounts = [
+                        c for c in r3_data
+                        if c.get("code", "") not in meter_code_map
+                    ]
 
                     for wp in wps_for_system:
                         wp_code     = str(wp.get("code", ""))
@@ -528,14 +537,40 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
                         if wp_code in existing_meter_serials:
                             continue
 
-                        # Find matching KR code via name in accounts
-                        for c in r3_data:
+                        # Try exact match first, then partial/contains
+                        matched_kr = None
+                        for c in unmapped_accounts:
                             c_name = (c.get("name") or "").lower().strip()
                             kr     = c.get("code", "")
-                            if c_name == wp_name_key and kr and kr not in meter_code_map:
-                                new_map_entries[kr] = wp_code
-                                log_msg(f"  📍 Auto-mapping {kr} → {wp_code} ({wp_name})")
+                            if not kr or kr in meter_code_map:
+                                continue
+                            # Exact match
+                            if c_name == wp_name_key:
+                                matched_kr = kr
                                 break
+                            # Partial match: account name contained
+                            # in water point name or vice versa
+                            if c_name and (
+                                c_name in wp_name_key
+                                or wp_name_key in c_name
+                            ):
+                                matched_kr = kr
+                                break
+
+                        if matched_kr:
+                            new_map_entries[matched_kr] = wp_code
+                            log_msg(
+                                f"  📍 Auto-mapping {matched_kr} "
+                                f"→ {wp_code} ({wp_name})"
+                            )
+                        else:
+                            # Log unmatched so operator can fix names
+                            log_msg(
+                                f"  ⚠ No accounts match for water "
+                                f"point: '{wp_name}' (code={wp_code}). "
+                                f"Ensure name matches an accounts "
+                                f"customer in mWater."
+                            )
 
                     if new_map_entries:
                         try:
@@ -718,7 +753,7 @@ def reallocate_payments(system_id: int, session, log: list = None, commit: bool 
     return updated
 
 
-# sync_billing
+# sync_billing 
 
 def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
 
