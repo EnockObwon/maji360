@@ -51,6 +51,10 @@ _DEFAULT_METER_CODE_MAP = {
     "KR12": "659281153",  # Daniel Abetegeka
     "KR13": "659281160",  # Segawa Williams
     "KR14": "659281218",  # Kimono Lois
+    "KR15": "659281225",  # Naira Zainabu Tap
+    "KR16": "659281263",  # Idaya Mosque Tap
+    "KR17": "659281287",  # Ayella Daniel Tap
+    "KR18": "659281294",  # Abdu Rahim Muzamiru Tap
 }
 
 CONN_TYPE_MAP = {
