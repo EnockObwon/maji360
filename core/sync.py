@@ -55,6 +55,8 @@ _DEFAULT_METER_CODE_MAP = {
     "KR16": "659281263",  # Idaya Mosque Tap
     "KR17": "659281287",  # Ayella Daniel Tap
     "KR18": "659281294",  # Abdu Rahim Muzamiru Tap
+    "KR19": "659281328",  # William Jawembe
+    "KR20": "659281311",  # Charles Chombe
 }
 
 CONN_TYPE_MAP = {
