@@ -57,6 +57,9 @@ _DEFAULT_METER_CODE_MAP = {
     "KR18": "659281294",  # Abdu Rahim Muzamiru Tap
     "KR19": "659281328",  # William Jawembe
     "KR20": "659281311",  # Charles Chombe
+    "KR21": "659281342",  # Adume Abrazaki
+    "KR22": "659281359",  # Paul Sanya
+    "KR23": "659281366",  # Mukie Emmanuel
 }
 
 CONN_TYPE_MAP = {
