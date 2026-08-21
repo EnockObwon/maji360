@@ -1,9 +1,10 @@
-# Maji360 · core/sync.py  v2.3  — Multi-System Sync Engine
-# Changes from v2.2:
-#   • Auto-update meter_code_map: when a new water point is
-#     found that isn't in the map, its KR code and meter serial
-#     are added to water_systems.meter_code_map automatically.
-#     No more manual SQL updates when new customers are added.
+# Maji360 · core/sync.py  v2.4  — Multi-System Sync Engine
+# Changes from v2.3:
+#   • sync_customers now refreshes connection_type for existing
+#     customers when mWater type_improved field differs from what
+#     is stored. Only updates when mWater has an explicit type —
+#     leaves manually corrected values (School, Institution)
+#     unchanged if type_improved is blank.
 
 import time
 import requests
@@ -55,15 +56,15 @@ _DEFAULT_METER_CODE_MAP = {
     "KR16": "659281263",  # Idaya Mosque Tap
     "KR17": "659281287",  # Ayella Daniel Tap
     "KR18": "659281294",  # Abdu Rahim Muzamiru Tap
-    "KR19": "659281328",  # William Jawembe
-    "KR20": "659281311",  # Charles Chombe
-    "KR21": "659281342",  # Adume Abrazaki
-    "KR22": "659281359",  # Paul Sanya
-    "KR23": "659281366",  # Mukie Emmanuel
-    "KR24": "659281373",  # Jesca Lekuru
-    "KR25": "659281380",  # Moses Warom
-    "KR26": "659281407",  # Okumu Saidi
-    "KR27": "659281414",  # Okumu Franco
+    "KR19": "659281328",
+    "KR20": "659281311",
+    "KR21": "659281342",
+    "KR22": "659281359",
+    "KR23": "659281366",
+    "KR24": "659281373",
+    "KR25": "659281380",
+    "KR26": "659281407",
+    "KR27": "659281414",
 }
 
 CONN_TYPE_MAP = {
@@ -518,107 +519,42 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
 
                     log_msg(f"  Accounts name index: {len(acc_name_to_code)} entries")
 
-                    # Auto-update meter_code_map 
-                    # If a water point's KR code is not yet in
-                    # meter_code_map, detect it via name match and add
-                    # it to water_systems.meter_code_map automatically.
-                    # Uses partial/contains matching to handle cases
-                    # where water point names have extra words vs the
-                    # accounts customer name (e.g. "John Doe Private
-                    # Connection" vs "John Doe").
-                    new_map_entries = {}
-                    existing_meter_serials = set(meter_code_map.values())
-
-                    # Build unmapped accounts customers for matching
-                    unmapped_accounts = [
-                        c for c in r3_data
-                        if c.get("code", "") not in meter_code_map
-                    ]
-
-                    for wp in wps_for_system:
-                        wp_code     = str(wp.get("code", ""))
-                        wp_name     = wp.get("name", "")
-                        if isinstance(wp_name, dict):
-                            wp_name = wp_name.get("en", "")
-                        wp_name_key = (wp_name or "").lower().strip()
-
-                        # Skip if already in the map
-                        if wp_code in existing_meter_serials:
-                            continue
-
-                        # Try exact match first, then partial/contains
-                        matched_kr = None
-                        for c in unmapped_accounts:
-                            c_name = (c.get("name") or "").lower().strip()
-                            kr     = c.get("code", "")
-                            if not kr or kr in meter_code_map:
-                                continue
-                            # Exact match
-                            if c_name == wp_name_key:
-                                matched_kr = kr
-                                break
-                            # Partial match: account name contained
-                            # in water point name or vice versa
-                            if c_name and (
-                                c_name in wp_name_key
-                                or wp_name_key in c_name
-                            ):
-                                matched_kr = kr
-                                break
-
-                        if matched_kr:
-                            new_map_entries[matched_kr] = wp_code
-                            log_msg(
-                                f"  📍 Auto-mapping {matched_kr} "
-                                f"→ {wp_code} ({wp_name})"
-                            )
-                        else:
-                            # Log unmatched so operator can fix names
-                            log_msg(
-                                f"  ⚠ No accounts match for water "
-                                f"point: '{wp_name}' (code={wp_code}). "
-                                f"Ensure name matches an accounts "
-                                f"customer in mWater."
-                            )
-
-                    if new_map_entries:
-                        try:
-                            merged = {**meter_code_map, **new_map_entries}
-                            session.execute(sql_text(
-                                "UPDATE water_systems "
-                                "SET meter_code_map = :m::jsonb "
-                                "WHERE id = :sid"
-                            ), {"m": json.dumps(merged), "sid": system_id})
-                            session.commit()
-                            # Update local copies so billing sync
-                            # uses the new map in the same run
-                            meter_code_map.update(new_map_entries)
-                            sys_cfg["meter_code_map"] = meter_code_map
-                            existing_meter_serials    = set(meter_code_map.values())
-                            log_msg(
-                                f"  ✓ meter_code_map updated with "
-                                f"{len(new_map_entries)} new entry(ies)"
-                            )
-                            # Rebuild meter_to_account with new entries
-                            for kr, meter_no in new_map_entries.items():
-                                for ca in r2_data:
-                                    cust_id  = ca.get("customer", "")
-                                    kr_code  = mw_customers.get(cust_id, "")
-                                    acc_code = ca.get("code", "")
-                                    if kr_code == kr and meter_no and acc_code:
-                                        meter_to_account[meter_no] = acc_code
-                        except Exception as e:
-                            log_msg(f"  ⚠ Could not update meter_code_map: {e}")
-
             except Exception as e:
                 log_msg(f"  Accounts lookup error: {e}")
 
+        conn_type_updated = 0
         new_count = 0
+
         for wp in wps_for_system:
             code = str(wp.get("code", ""))
-            if not code or code in existing_meters:
+            if not code:
                 continue
 
+            wp_type = wp.get("type_improved") or wp.get("type_")
+
+            # Existing customer: refresh connection_type
+            # Only updates when mWater has an explicit type_improved
+            # value in CONN_TYPE_MAP. Leaves manually set values
+            # (School, Institution) unchanged if type is blank.
+            if code in existing_meters:
+                if wp_type and wp_type in CONN_TYPE_MAP:
+                    new_conn_type = CONN_TYPE_MAP[wp_type]
+                    existing_cust = session.query(Customer).filter_by(
+                        system_id=system_id, meter_no=code
+                    ).first()
+                    if existing_cust and \
+                       existing_cust.connection_type != new_conn_type:
+                        log_msg(
+                            f"  ↻ {existing_cust.account_no} "
+                            f"({existing_cust.name}) connection_type: "
+                            f"{existing_cust.connection_type} "
+                            f"→ {new_conn_type}"
+                        )
+                        existing_cust.connection_type = new_conn_type
+                        conn_type_updated += 1
+                continue
+
+            # New customer: create 
             name = wp.get("name", f"Customer {code}")
             if isinstance(name, dict):
                 name = name.get("en", str(name))
@@ -635,7 +571,6 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
                 continue
 
             account_no      = matched_acc or f"{system_name[:3].upper()}-{code}"
-            wp_type         = wp.get("type_improved") or wp.get("type_")
             connection_type = _infer_connection_type(name, wp_type)
 
             session.add(Customer(
@@ -645,7 +580,10 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
             ))
             existing_meters.add(code)
             new_count += 1
-            log_msg(f"  ✓ {name} (meter={code}, acc={account_no})")
+            log_msg(f"  ✓ {name} (meter={code}, acc={account_no}, type={connection_type})")
+
+        if conn_type_updated:
+            log_msg(f"  ↻ Connection types refreshed: {conn_type_updated}")
 
         session.commit()
 
@@ -1181,7 +1119,7 @@ def recalculate_nrw(system_id: int, session) -> None:
     session.commit()
 
 
-# _fetch_all_transactions 
+# _fetch_all_transactions
 
 def _fetch_all_transactions(accounts_base: str, accounts_key: str) -> list[dict]:
     all_txns: list[dict] = []
