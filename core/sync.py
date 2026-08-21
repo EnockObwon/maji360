@@ -60,6 +60,10 @@ _DEFAULT_METER_CODE_MAP = {
     "KR21": "659281342",  # Adume Abrazaki
     "KR22": "659281359",  # Paul Sanya
     "KR23": "659281366",  # Mukie Emmanuel
+    "KR24": "659281373",  # Jesca Lekuru
+    "KR25": "659281380",  # Moses Warom
+    "KR26": "659281407",  # Okumu Saidi
+    "KR27": "659281414",  # Okumu Franco
 }
 
 CONN_TYPE_MAP = {
