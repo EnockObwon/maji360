@@ -308,6 +308,10 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             pe   = safe_float(data.get(pump_end_fid))
             te   = safe_float(data.get(tank_end_fid))
 
+            # Temporary diagnostic — remove after fixing field IDs
+            if pe is None and te is None and data:
+                log_msg(f"  DEBUG fields: {list(data.keys())[:10]}")
+
             submitted = r.get("submittedOn", "")
             try:
                 reading_date = datetime.fromisoformat(
