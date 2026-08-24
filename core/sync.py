@@ -25,7 +25,7 @@ except ImportError:
     _SYNCLOG_AVAILABLE = False
 
 
-# Karungu (system 1) fallback constants 
+# ── Karungu (system 1) fallback constants ─────────────────────
 
 _DEFAULT_GROUP_ID        = "718ce61fbf4f4742bd1018cabf90d1e8"
 _DEFAULT_WATER_SYSTEM_ID = "b0e76a15-7047-4c5e-a986-e2bba550a4ff"
@@ -95,7 +95,7 @@ def _infer_connection_type(name: str, wp_type: str = None) -> str:
     return "PSP"
 
 
-# Config helpers 
+# ── Config helpers ─────────────────────────────────────────────
 
 def get_mwater_config(system: WaterSystem = None) -> dict:
     try:
@@ -198,7 +198,7 @@ def _write_sync_log(session, system_id, triggered_by, status,
         pass
 
 
-# Main entry point 
+# ── Main entry point ───────────────────────────────────────────
 
 def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") -> dict:
     t_start = time.time()
@@ -237,7 +237,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             session.close()
             return {"error": err_msg, "system": system_name}
 
-        # Fetch mWater responses 
+        # ── Fetch mWater responses ─────────────────────────────
         log_msg("Fetching mWater responses...")
         all_responses = []
         skip = 0
@@ -308,9 +308,17 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             pe   = safe_float(data.get(pump_end_fid))
             te   = safe_float(data.get(tank_end_fid))
 
-            # Temporary diagnostic — remove after fixing field IDs
-            if pe is None and te is None and data:
-                log_msg(f"  DEBUG fields: {list(data.keys())[:10]}")
+            # ── TEMPORARY DIAGNOSTIC — remove after fixing field IDs ──
+            # Logs the actual field keys coming back from mWater so we
+            # can identify the new pump/tank field IDs after form edit.
+            if pe is None and te is None and data and resp_id not in existing_ids:
+                numeric_fields = {
+                    k: v for k, v in data.items()
+                    if isinstance(v, (int, float))
+                    or (isinstance(v, dict) and isinstance(v.get("value"), (int, float)))
+                }
+                if numeric_fields:
+                    log_msg(f"  DEBUG {resp_id[:8]}: {numeric_fields}")
 
             submitted = r.get("submittedOn", "")
             try:
@@ -428,7 +436,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
     return results
 
 
-# sync_customers 
+# ── sync_customers ─────────────────────────────────────────────
 
 def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) -> int:
 
@@ -536,7 +544,7 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
 
             wp_type = wp.get("type_improved") or wp.get("type_")
 
-            # Existing customer: refresh connection_type
+            # ── Existing customer: refresh connection_type ─────
             # Only updates when mWater has an explicit type_improved
             # value in CONN_TYPE_MAP. Leaves manually set values
             # (School, Institution) unchanged if type is blank.
@@ -558,7 +566,7 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
                         conn_type_updated += 1
                 continue
 
-            # New customer: create 
+            # ── New customer: create ───────────────────────────
             name = wp.get("name", f"Customer {code}")
             if isinstance(name, dict):
                 name = name.get("en", str(name))
@@ -655,7 +663,7 @@ def _sync_customers_from_accounts(system_id, session, cfg, log, water_system_id=
         return 0
 
 
-# reallocate_payments 
+# ── reallocate_payments ────────────────────────────────────────
 
 def reallocate_payments(system_id: int, session, log: list = None, commit: bool = True) -> int:
 
@@ -704,7 +712,7 @@ def reallocate_payments(system_id: int, session, log: list = None, commit: bool 
     return updated
 
 
-# sync_billing 
+# ── sync_billing ───────────────────────────────────────────────
 
 def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
 
@@ -792,7 +800,7 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
         session.commit()
         log_msg(f"  New bills added: {new_bills}")
 
-        # Orphan detection 
+        # ── Orphan detection ───────────────────────────────────
         if all_txns:
             current_billing_ids = {
                 t.get("_id") or t.get("id")
@@ -824,7 +832,7 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
         else:
             log_msg("  (skipping orphan check — no transactions returned from mWater)")
 
-        # Payment allocation 
+        # ── Payment allocation ─────────────────────────────────
         log_msg("  Recalculating payment allocation...")
         updated = reallocate_payments(system_id, session, log, commit=True)
         log_msg(f"  Payment records updated: {updated}")
@@ -835,7 +843,7 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
         return 0
 
 
-# sync_payments 
+# ── sync_payments ──────────────────────────────────────────────
 
 def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
 
@@ -968,7 +976,7 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
                 session.commit()
                 log_msg(f"  ↻ Backfilled transaction_id on {backfilled} pre-existing payment(s)")
 
-        # Orphan detection 
+        # ── Orphan detection ───────────────────────────────────
         if all_txns:
             current_payment_ids = {
                 t.get("_id") or t.get("id")
@@ -1017,7 +1025,7 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
         return 0
 
 
-# sync_expenses 
+# ── sync_expenses ──────────────────────────────────────────────
 
 def sync_expenses(system_id, session, cfg, log) -> int:
 
@@ -1088,7 +1096,7 @@ def sync_expenses(system_id, session, cfg, log) -> int:
         return 0
 
 
-# recalculate_nrw 
+# ── recalculate_nrw ────────────────────────────────────────────
 
 def recalculate_nrw(system_id: int, session) -> None:
     readings = session.query(DailyReading).filter_by(system_id=system_id).all()
@@ -1123,7 +1131,7 @@ def recalculate_nrw(system_id: int, session) -> None:
     session.commit()
 
 
-# _fetch_all_transactions
+# ── _fetch_all_transactions ────────────────────────────────────
 
 def _fetch_all_transactions(accounts_base: str, accounts_key: str) -> list[dict]:
     all_txns: list[dict] = []
