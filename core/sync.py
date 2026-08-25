@@ -1398,6 +1398,8 @@ def recalculate_nrw(system_id: int, session) -> None:
     monthly: dict[str, dict] = defaultdict(lambda: {"pumped": 0.0, "consumed": 0.0})
 
     for r in readings:
+        if r.is_orphaned:
+            continue  # source response deleted in mWater — don't count it
         month = r.reading_date.strftime("%Y-%m")
         if r.water_produced_m3 and r.water_produced_m3 > 0:
             monthly[month]["pumped"]   += r.water_produced_m3
@@ -1422,6 +1424,21 @@ def recalculate_nrw(system_id: int, session) -> None:
                 water_produced=pumped, water_billed=consumed,
                 nrw_m3=nrw_m3, nrw_percent=nrw_pct,
             ))
+
+    # Delete any NRWRecord for a month that no longer has ANY
+    # qualifying readings backing it. Without this, a month's NRW
+    # figure survives indefinitely after its underlying readings are
+    # moved or deleted — this is exactly what happened to Nyakabale-
+    # Kibibira: its NRWRecord was computed while it temporarily (and
+    # incorrectly) held Karungu's misattributed readings, and once
+    # those were corrected back to Karungu, Nyakabale's
+    # daily_readings became empty but the stale NRWRecord was never
+    # cleared, so the dashboard kept showing a computed NRW% for a
+    # system with zero real readings.
+    current_months = set(monthly.keys())
+    for rec in session.query(NRWRecord).filter_by(system_id=system_id).all():
+        if rec.month not in current_months:
+            session.delete(rec)
 
     session.commit()
 
