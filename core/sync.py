@@ -30,6 +30,23 @@ except ImportError:
 _DEFAULT_GROUP_ID        = "718ce61fbf4f4742bd1018cabf90d1e8"
 _DEFAULT_WATER_SYSTEM_ID = "b0e76a15-7047-4c5e-a986-e2bba550a4ff"
 
+# Entity "code" for Karungu RGC Piped Water Supply System as it
+# appears in mWater response data for the "Select the Water system"
+# question — distinct from _DEFAULT_WATER_SYSTEM_ID above, which is a
+# UUID used elsewhere (customer/water-point sync). Confirmed against
+# both the form's entity "Unique ID: 659279415" and the raw response
+# field ea7e4cb5407e4ddbb97d408cf4d08a31: {'value': {'code': '659279415'}}.
+_DEFAULT_WATER_SYSTEM_CODE = "659279415"
+
+# Field ID for "Select the Water system" on the shared TWT Piped
+# Scheme Operator daily survey form. This form is used by multiple
+# water systems (the water system is a question, not implied by
+# form_id), so every response must be checked against this field
+# before being attributed to any one system — otherwise whichever
+# system's sync runs first claims responses that may belong to a
+# different system entirely.
+_WATER_SYSTEM_SELECT_FID = "ea7e4cb5407e4ddbb97d408cf4d08a31"
+
 _DEFAULT_FIELD_IDS = {
     "pump_start": "7411292765fa4fb7a0217bfb001ab167",
     "pump_end":   "3456b8d568fe46b49dd0843a58cdc143",
@@ -134,16 +151,26 @@ def safe_float(val) -> float | None:
 
 
 def _get_system_config(system: WaterSystem) -> dict:
-    group_id        = getattr(system, "mwater_group_id", None)        or _DEFAULT_GROUP_ID
-    water_system_id = getattr(system, "mwater_water_system_id", None) or _DEFAULT_WATER_SYSTEM_ID
+    group_id         = getattr(system, "mwater_group_id", None)         or _DEFAULT_GROUP_ID
+    water_system_id  = getattr(system, "mwater_water_system_id", None)  or _DEFAULT_WATER_SYSTEM_ID
+    # NOTE: mwater_water_system_code is a NEW attribute — if the
+    # WaterSystem model doesn't have this column yet, getattr's default
+    # keeps this working (falls back to the Karungu default for every
+    # system until a migration adds a real per-system value). Every
+    # system sharing this form needs its OWN correct code here, or
+    # this system will simply never match any response and will sync
+    # zero readings — check the DEBUG "Select the Water system" output
+    # in this system's own log to find its actual code.
+    water_system_code = getattr(system, "mwater_water_system_code", None) or _DEFAULT_WATER_SYSTEM_CODE
     field_ids       = getattr(system, "mwater_field_ids", None)        or _DEFAULT_FIELD_IDS
     _raw_map        = getattr(system, "meter_code_map", None)
     meter_code_map  = _DEFAULT_METER_CODE_MAP if _raw_map is None else _raw_map
     return {
-        "group_id":        group_id,
-        "water_system_id": water_system_id,
-        "field_ids":       field_ids,
-        "meter_code_map":  meter_code_map,
+        "group_id":          group_id,
+        "water_system_id":   water_system_id,
+        "water_system_code": water_system_code,
+        "field_ids":         field_ids,
+        "meter_code_map":    meter_code_map,
     }
 
 
@@ -228,6 +255,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         log_msg(f"Form ID  : {form_id}")
         log_msg(f"Group ID : {sys_cfg['group_id']}")
         log_msg(f"WS UUID  : {sys_cfg['water_system_id']}")
+        log_msg(f"WS Code  : {sys_cfg['water_system_code']}")
         log_msg(f"{'─'*44}")
 
         if not form_id:
@@ -315,9 +343,11 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         pump_start_fid = fids.get("pump_start", _DEFAULT_FIELD_IDS["pump_start"])
         tank_start_fid = fids.get("tank_start", _DEFAULT_FIELD_IDS["tank_start"])
 
+        water_system_code = sys_cfg["water_system_code"]
+
         new_pump = new_tank = duplicates = 0
         incomplete_pump = incomplete_tank = other_monitoring = 0
-        processing_errors = cross_system_conflicts = 0
+        processing_errors = cross_system_conflicts = other_water_system = 0
         incomplete_samples: list[str] = []
         MAX_DEBUG_SAMPLES = 5  # avoid flooding the log every single run
 
@@ -333,6 +363,27 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             # it (the outer try/except covers the entire function).
             try:
                 data = r.get("data", {})
+
+                # ── Water-system filter ──────────────────────────
+                # This form is shared across multiple water systems
+                # ("Select the Water system" is a question on the
+                # form, not implied by form_id). Without this check,
+                # whichever system's sync runs first claims a response
+                # via the table-wide mwater_response_id uniqueness,
+                # even if it was submitted for a different system
+                # entirely — which is what caused Karungu's own Aug
+                # 23/24 pump-house readings to be missing here. Skip
+                # anything not explicitly tagged for THIS system.
+                ws_field = data.get(_WATER_SYSTEM_SELECT_FID)
+                ws_code  = None
+                if isinstance(ws_field, dict):
+                    val = ws_field.get("value")
+                    if isinstance(val, dict):
+                        ws_code = val.get("code")
+                if ws_code is not None and ws_code != water_system_code:
+                    other_water_system += 1
+                    continue
+
                 pe   = safe_float(data.get(pump_end_fid))
                 te   = safe_float(data.get(tank_end_fid))
 
@@ -467,6 +518,12 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         log_msg(f"New pump readings : {new_pump}")
         log_msg(f"New tank readings : {new_tank}")
         log_msg(f"Duplicates skipped: {duplicates}")
+        if other_water_system:
+            log_msg(
+                f"  ({other_water_system} response(s) were submitted for a "
+                f"different water system on this shared form — filtered "
+                f"out before processing, not an error)"
+            )
         if processing_errors:
             log_msg(
                 f"✗ {processing_errors} response(s) threw an error during "
@@ -475,12 +532,13 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             )
         if cross_system_conflicts:
             log_msg(
-                f"⚠ {cross_system_conflicts} response(s) had already been "
-                f"synced under a different system_id (this form is shared "
-                f"across water systems and the fetch isn't filtered by "
-                f"water system) — skipped safely, not overwritten. If this "
-                f"count grows, consider adding a water-system filter to "
-                f"the fetch."
+                f"⚠ {cross_system_conflicts} response(s) tagged for THIS "
+                f"system already existed in daily_readings under a "
+                f"different system_id — likely claimed by another "
+                f"system's sync before this filter was added, or before "
+                f"that system also adopts this same filter. Skipped "
+                f"safely, not overwritten. Consider a one-time data "
+                f"correction to move these to the right system_id."
             )
         if incomplete_pump or incomplete_tank:
             log_msg(
@@ -540,6 +598,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             "other_monitoring":      other_monitoring,
             "processing_errors":     processing_errors,
             "cross_system_conflicts": cross_system_conflicts,
+            "other_water_system":     other_water_system,
             "synced_at":             datetime.now(timezone.utc).isoformat(),
         }
         _write_sync_log(session, system_id, triggered_by, status, results, duration, log or [])
