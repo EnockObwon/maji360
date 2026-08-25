@@ -285,12 +285,22 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
 
         all_responses.sort(key=_submitted_dt)
 
+        # NOTE: intentionally NOT scoped to this system_id. The
+        # daily_readings.mwater_response_id unique constraint is
+        # table-wide, because this mWater form is shared across
+        # multiple water systems ("Select the Water system" is a
+        # question on the form, not implied by form_id) and the
+        # response fetch below has no water-system filter. Scoping
+        # this query to system_id would make a system's sync blind to
+        # IDs another system's sync already claimed, causing it to
+        # re-attempt an insert Postgres will reject — which is exactly
+        # what happened on 2026-08-25's run.
         existing_ids = set(
             row[0]
             for row in session.execute(sql_text(
                 "SELECT mwater_response_id FROM daily_readings "
-                "WHERE system_id = :sid AND mwater_response_id IS NOT NULL"
-            ), {"sid": system_id}).fetchall()
+                "WHERE mwater_response_id IS NOT NULL"
+            )).fetchall()
             if row[0]
         )
 
@@ -307,7 +317,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
 
         new_pump = new_tank = duplicates = 0
         incomplete_pump = incomplete_tank = other_monitoring = 0
-        processing_errors = 0
+        processing_errors = cross_system_conflicts = 0
         incomplete_samples: list[str] = []
         MAX_DEBUG_SAMPLES = 5  # avoid flooding the log every single run
 
@@ -390,15 +400,63 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 if pe is None and te is None:
                     continue
 
-                session.add(DailyReading(
-                    system_id=system_id, reading_date=reading_date,
-                    water_produced_m3=pumped, water_consumed_m3=consumed,
-                    water_sold_m3=0.0, pump_end_reading=pe, tank_end_reading=te,
-                    mwater_response_id=resp_id, synced_at=datetime.now(timezone.utc),
-                ))
-                existing_ids.add(resp_id)
-                if pumped   > 0: new_pump += 1
-                if consumed > 0: new_tank += 1
+                # Insert immediately, one row at a time, with
+                # ON CONFLICT DO NOTHING — NOT a deferred session.add().
+                # This form is shared across multiple water systems and
+                # the fetch above has no water-system filter, so a
+                # response_id already claimed by another system's sync
+                # is a real, expected possibility here, not corruption.
+                # A deferred/batched insert lets ONE such collision
+                # abort the WHOLE batch (this is exactly what happened
+                # on 2026-08-25 — nine pending readings, including two
+                # genuinely new ones, were all rolled back because of
+                # one unrelated conflicting row). Per-row upsert means
+                # a collision skips only that row.
+                # Wrapped in a SAVEPOINT: if this row's insert hits an
+                # unexpected DB error (anything other than the handled
+                # ON CONFLICT case), Postgres would otherwise mark the
+                # WHOLE transaction as aborted, failing every
+                # subsequent row's insert for the rest of this loop
+                # too. The savepoint confines any such failure to just
+                # this one row.
+                with session.begin_nested():
+                    result = session.execute(sql_text("""
+                        INSERT INTO daily_readings
+                            (system_id, reading_date, water_produced_m3,
+                             water_consumed_m3, water_sold_m3,
+                             pump_end_reading, tank_end_reading,
+                             mwater_response_id, synced_at)
+                        VALUES
+                            (:system_id, :reading_date, :pumped, :consumed,
+                             0.0, :pe, :te, :resp_id, :synced_at)
+                        ON CONFLICT (mwater_response_id) DO NOTHING
+                        RETURNING id
+                    """), {
+                        "system_id":    system_id,
+                        "reading_date": reading_date,
+                        "pumped":       pumped,
+                        "consumed":     consumed,
+                        "pe":           pe,
+                        "te":           te,
+                        "resp_id":      resp_id,
+                        "synced_at":    datetime.now(timezone.utc),
+                    })
+                    inserted_row = result.fetchone()
+
+                if inserted_row is None:
+                    # Row already existed in the table under this same
+                    # ID — almost certainly synced already by another
+                    # water system's run against this shared form.
+                    cross_system_conflicts += 1
+                    log_msg(
+                        f"  ⚠ Response {resp_id[:8]} already exists in "
+                        f"daily_readings (different system's sync likely "
+                        f"claimed it — this form is shared). Skipped."
+                    )
+                else:
+                    existing_ids.add(resp_id)
+                    if pumped   > 0: new_pump += 1
+                    if consumed > 0: new_tank += 1
 
             except Exception as e:
                 processing_errors += 1
@@ -414,6 +472,15 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 f"✗ {processing_errors} response(s) threw an error during "
                 f"processing and were skipped individually — see lines above "
                 f"for details. The rest of the run continued normally."
+            )
+        if cross_system_conflicts:
+            log_msg(
+                f"⚠ {cross_system_conflicts} response(s) had already been "
+                f"synced under a different system_id (this form is shared "
+                f"across water systems and the fetch isn't filtered by "
+                f"water system) — skipped safely, not overwritten. If this "
+                f"count grows, consider adding a water-system filter to "
+                f"the fetch."
             )
         if incomplete_pump or incomplete_tank:
             log_msg(
@@ -468,11 +535,12 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             "new_payments":      new_payments,
             "new_expenses":      new_expenses,
             "duplicates":        duplicates,
-            "incomplete_pump":   incomplete_pump,
-            "incomplete_tank":   incomplete_tank,
-            "other_monitoring":  other_monitoring,
-            "processing_errors": processing_errors,
-            "synced_at":         datetime.now(timezone.utc).isoformat(),
+            "incomplete_pump":       incomplete_pump,
+            "incomplete_tank":       incomplete_tank,
+            "other_monitoring":      other_monitoring,
+            "processing_errors":     processing_errors,
+            "cross_system_conflicts": cross_system_conflicts,
+            "synced_at":             datetime.now(timezone.utc).isoformat(),
         }
         _write_sync_log(session, system_id, triggered_by, status, results, duration, log or [])
 
