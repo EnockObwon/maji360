@@ -255,12 +255,18 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 if resp.status_code != 200:
                     log_msg(f"  mWater API error: {resp.status_code} — {resp.text[:120]}")
                     break
-                batch = [r for r in resp.json() if r.get("form") == form_id]
-                if not batch:
-                    break
+                raw_page = resp.json()
+                batch    = [r for r in raw_page if r.get("form") == form_id]
                 all_responses.extend(batch)
-                log_msg(f"  Fetched {len(all_responses)} responses...")
-                if len(batch) < 100:
+                if batch:
+                    log_msg(f"  Fetched {len(all_responses)} responses...")
+                # Continue paging based on the RAW page size, not the
+                # post-filter count — if even one item in a full page
+                # doesn't match form_id, len(batch) can drop below the
+                # page limit while the API still has more pages behind
+                # it, silently truncating the fetch before it reaches
+                # the newest responses.
+                if len(raw_page) < 100:
                     break
                 skip += 100
             except Exception as e:
@@ -283,8 +289,8 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             row[0]
             for row in session.execute(sql_text(
                 "SELECT mwater_response_id FROM daily_readings "
-                "WHERE mwater_response_id IS NOT NULL"
-            )).fetchall()
+                "WHERE system_id = :sid AND mwater_response_id IS NOT NULL"
+            ), {"sid": system_id}).fetchall()
             if row[0]
         )
 
@@ -296,7 +302,14 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         pump_end_fid = fids.get("pump_end", _DEFAULT_FIELD_IDS["pump_end"])
         tank_end_fid = fids.get("tank_end", _DEFAULT_FIELD_IDS["tank_end"])
 
+        pump_start_fid = fids.get("pump_start", _DEFAULT_FIELD_IDS["pump_start"])
+        tank_start_fid = fids.get("tank_start", _DEFAULT_FIELD_IDS["tank_start"])
+
         new_pump = new_tank = duplicates = 0
+        incomplete_pump = incomplete_tank = other_monitoring = 0
+        processing_errors = 0
+        incomplete_samples: list[str] = []
+        MAX_DEBUG_SAMPLES = 5  # avoid flooding the log every single run
 
         for r in all_responses:
             resp_id = r.get("_id", r.get("id", ""))
@@ -304,71 +317,118 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 duplicates += 1
                 continue
 
-            data = r.get("data", {})
-            pe   = safe_float(data.get(pump_end_fid))
-            te   = safe_float(data.get(tank_end_fid))
-
-            # ── TEMPORARY DIAGNOSTIC — remove after fixing field IDs ──
-            # Logs the actual field keys coming back from mWater so we
-            # can identify the new pump/tank field IDs after form edit.
-            if pe is None and te is None and data and resp_id not in existing_ids:
-                numeric_fields = {
-                    k: v for k, v in data.items()
-                    if isinstance(v, (int, float))
-                    or (isinstance(v, dict) and isinstance(v.get("value"), (int, float)))
-                }
-                if numeric_fields:
-                    log_msg(f"  DEBUG {resp_id[:8]}: {numeric_fields}")
-
-            submitted = r.get("submittedOn", "")
+            # Isolate each response: a single malformed/unexpected
+            # response should never be able to abort the whole run and
+            # take customers/billing/payments/expenses/NRW down with
+            # it (the outer try/except covers the entire function).
             try:
-                reading_date = datetime.fromisoformat(
-                    submitted.replace("Z", "+00:00")
-                ) if submitted else datetime.now(timezone.utc)
-            except Exception:
-                reading_date = datetime.now(timezone.utc)
+                data = r.get("data", {})
+                pe   = safe_float(data.get(pump_end_fid))
+                te   = safe_float(data.get(tank_end_fid))
 
-            pumped = 0.0
-            if pe is not None:
-                if last_pump_end is not None:
-                    diff = round(pe - last_pump_end, 2)
-                    if diff > 0:
-                        pumped = diff
-                    elif diff < 0:
-                        log_msg(f"  ⚠ Pump meter went backwards ({last_pump_end} → {pe}) — skipping.")
-                else:
-                    log_msg(f"  First pump baseline: {pe}")
-                last_pump_end = pe
+                # ── Monitoring-type classifier ──────────────────
+                # "Type of monitoring" on this form branches to one of:
+                # Pump house / Tower-Reservoir / PSPs / Private connection /
+                # Solar Array / Distribution line — only the selected
+                # branch's fields are answered, so most responses will
+                # legitimately have neither pump_end nor tank_end. We only
+                # want to flag the ones where a Pump-house or Tower visit
+                # was STARTED (pump_start/tank_start present) but never
+                # completed with an end reading — that's an actionable
+                # field-ops gap, unlike a plain PSP/Solar/Distribution visit.
+                if pe is None and te is None and data:
+                    ps = safe_float(data.get(pump_start_fid))
+                    ts = safe_float(data.get(tank_start_fid))
+                    if ps is not None:
+                        incomplete_pump += 1
+                    elif ts is not None:
+                        incomplete_tank += 1
+                    else:
+                        other_monitoring += 1
 
-            consumed = 0.0
-            if te is not None:
-                if last_tank_end is not None:
-                    diff = round(te - last_tank_end, 2)
-                    if diff > 0:
-                        consumed = diff
-                    elif diff < 0:
-                        log_msg(f"  ⚠ Tank meter went backwards ({last_tank_end} → {te}) — skipping.")
-                else:
-                    log_msg(f"  First tank baseline: {te}")
-                last_tank_end = te
+                    if (ps is not None or ts is not None) and len(incomplete_samples) < MAX_DEBUG_SAMPLES:
+                        # Capture ALL fields (not just numeric) so we can
+                        # also see the "Type of monitoring" answer and any
+                        # text fields — helps confirm which branch this is
+                        # and whether it's a stalled draft vs a one-off.
+                        sample = f"  DEBUG incomplete {resp_id[:8]}: {data}"
+                        log_msg(sample)
+                        incomplete_samples.append(sample)
 
-            if pe is None and te is None:
+                submitted = r.get("submittedOn", "")
+                try:
+                    reading_date = datetime.fromisoformat(
+                        submitted.replace("Z", "+00:00")
+                    ) if submitted else datetime.now(timezone.utc)
+                except Exception:
+                    reading_date = datetime.now(timezone.utc)
+
+                pumped = 0.0
+                if pe is not None:
+                    if last_pump_end is not None:
+                        diff = round(pe - last_pump_end, 2)
+                        if diff > 0:
+                            pumped = diff
+                        elif diff < 0:
+                            log_msg(f"  ⚠ Pump meter went backwards ({last_pump_end} → {pe}) — skipping.")
+                    else:
+                        log_msg(f"  First pump baseline: {pe}")
+                    last_pump_end = pe
+
+                consumed = 0.0
+                if te is not None:
+                    if last_tank_end is not None:
+                        diff = round(te - last_tank_end, 2)
+                        if diff > 0:
+                            consumed = diff
+                        elif diff < 0:
+                            log_msg(f"  ⚠ Tank meter went backwards ({last_tank_end} → {te}) — skipping.")
+                    else:
+                        log_msg(f"  First tank baseline: {te}")
+                    last_tank_end = te
+
+                if pe is None and te is None:
+                    continue
+
+                session.add(DailyReading(
+                    system_id=system_id, reading_date=reading_date,
+                    water_produced_m3=pumped, water_consumed_m3=consumed,
+                    water_sold_m3=0.0, pump_end_reading=pe, tank_end_reading=te,
+                    mwater_response_id=resp_id, synced_at=datetime.now(timezone.utc),
+                ))
+                existing_ids.add(resp_id)
+                if pumped   > 0: new_pump += 1
+                if consumed > 0: new_tank += 1
+
+            except Exception as e:
+                processing_errors += 1
+                log_msg(f"  ✗ Failed to process response {resp_id[:8] if resp_id else '?'}: {e}")
                 continue
-
-            session.add(DailyReading(
-                system_id=system_id, reading_date=reading_date,
-                water_produced_m3=pumped, water_consumed_m3=consumed,
-                water_sold_m3=0.0, pump_end_reading=pe, tank_end_reading=te,
-                mwater_response_id=resp_id, synced_at=datetime.now(timezone.utc),
-            ))
-            existing_ids.add(resp_id)
-            if pumped   > 0: new_pump += 1
-            if consumed > 0: new_tank += 1
 
         session.commit()
         log_msg(f"New pump readings : {new_pump}")
         log_msg(f"New tank readings : {new_tank}")
         log_msg(f"Duplicates skipped: {duplicates}")
+        if processing_errors:
+            log_msg(
+                f"✗ {processing_errors} response(s) threw an error during "
+                f"processing and were skipped individually — see lines above "
+                f"for details. The rest of the run continued normally."
+            )
+        if incomplete_pump or incomplete_tank:
+            log_msg(
+                f"⚠ INCOMPLETE VISITS: {incomplete_pump} Pump-house response(s) and "
+                f"{incomplete_tank} Tower/Reservoir response(s) had a START reading "
+                f"but no END reading — field ops likely started the visit and never "
+                f"returned to close it out. These will keep showing up here until "
+                f"completed on the form. See sample(s) above."
+            )
+        if other_monitoring:
+            log_msg(
+                f"  ({other_monitoring} response(s) were a different monitoring type "
+                f"— PSPs/Private connection/Solar/Distribution — no pump/tank data "
+                f"expected, not an error)"
+            )
 
         log_msg("Syncing customers from mWater...")
         new_customers = sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log)
@@ -400,15 +460,19 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         log_msg(f"✓ Sync complete in {duration}s")
 
         results = {
-            "system":        system_name,
-            "new_pump":      new_pump,
-            "new_tank":      new_tank,
-            "new_customers": new_customers,
-            "new_bills":     new_bills,
-            "new_payments":  new_payments,
-            "new_expenses":  new_expenses,
-            "duplicates":    duplicates,
-            "synced_at":     datetime.now(timezone.utc).isoformat(),
+            "system":            system_name,
+            "new_pump":          new_pump,
+            "new_tank":          new_tank,
+            "new_customers":     new_customers,
+            "new_bills":         new_bills,
+            "new_payments":      new_payments,
+            "new_expenses":      new_expenses,
+            "duplicates":        duplicates,
+            "incomplete_pump":   incomplete_pump,
+            "incomplete_tank":   incomplete_tank,
+            "other_monitoring":  other_monitoring,
+            "processing_errors": processing_errors,
+            "synced_at":         datetime.now(timezone.utc).isoformat(),
         }
         _write_sync_log(session, system_id, triggered_by, status, results, duration, log or [])
 
@@ -544,10 +608,6 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
 
             wp_type = wp.get("type_improved") or wp.get("type_")
 
-            # ── Existing customer: refresh connection_type ─────
-            # Only updates when mWater has an explicit type_improved
-            # value in CONN_TYPE_MAP. Leaves manually set values
-            # (School, Institution) unchanged if type is blank.
             if code in existing_meters:
                 if wp_type and wp_type in CONN_TYPE_MAP:
                     new_conn_type = CONN_TYPE_MAP[wp_type]
@@ -566,7 +626,6 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
                         conn_type_updated += 1
                 continue
 
-            # ── New customer: create ───────────────────────────
             name = wp.get("name", f"Customer {code}")
             if isinstance(name, dict):
                 name = name.get("en", str(name))
@@ -800,7 +859,6 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
         session.commit()
         log_msg(f"  New bills added: {new_bills}")
 
-        # ── Orphan detection ───────────────────────────────────
         if all_txns:
             current_billing_ids = {
                 t.get("_id") or t.get("id")
@@ -832,7 +890,6 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
         else:
             log_msg("  (skipping orphan check — no transactions returned from mWater)")
 
-        # ── Payment allocation ─────────────────────────────────
         log_msg("  Recalculating payment allocation...")
         updated = reallocate_payments(system_id, session, log, commit=True)
         log_msg(f"  Payment records updated: {updated}")
@@ -934,7 +991,6 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
         session.commit()
         log_msg(f"  New payments synced: {new_payments}")
 
-        # Backfill transaction_id for pre-existing payments
         if payment_txns:
             backfilled = 0
             for t in payment_txns:
@@ -976,7 +1032,6 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
                 session.commit()
                 log_msg(f"  ↻ Backfilled transaction_id on {backfilled} pre-existing payment(s)")
 
-        # ── Orphan detection ───────────────────────────────────
         if all_txns:
             current_payment_ids = {
                 t.get("_id") or t.get("id")
