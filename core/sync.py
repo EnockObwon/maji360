@@ -25,7 +25,7 @@ except ImportError:
     _SYNCLOG_AVAILABLE = False
 
 
-# ── Karungu (system 1) fallback constants ─────────────────────
+# Karungu (system 1) fallback constants 
 
 _DEFAULT_GROUP_ID        = "718ce61fbf4f4742bd1018cabf90d1e8"
 _DEFAULT_WATER_SYSTEM_ID = "b0e76a15-7047-4c5e-a986-e2bba550a4ff"
@@ -112,7 +112,7 @@ def _infer_connection_type(name: str, wp_type: str = None) -> str:
     return "PSP"
 
 
-# ── Config helpers ─────────────────────────────────────────────
+# Config helpers 
 
 def get_mwater_config(system: WaterSystem = None) -> dict:
     try:
@@ -225,7 +225,7 @@ def _write_sync_log(session, system_id, triggered_by, status,
         pass
 
 
-# ── Main entry point ───────────────────────────────────────────
+# Main entry point 
 
 def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") -> dict:
     t_start = time.time()
@@ -265,7 +265,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             session.close()
             return {"error": err_msg, "system": system_name}
 
-        # ── Fetch mWater responses ─────────────────────────────
+        # Fetch mWater responses 
         log_msg("Fetching mWater responses...")
         all_responses = []
         skip = 0
@@ -364,7 +364,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             try:
                 data = r.get("data", {})
 
-                # ── Water-system filter ──────────────────────────
+                # Water-system filter 
                 # This form is shared across multiple water systems
                 # ("Select the Water system" is a question on the
                 # form, not implied by form_id). Without this check,
@@ -387,7 +387,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 pe   = safe_float(data.get(pump_end_fid))
                 te   = safe_float(data.get(tank_end_fid))
 
-                # ── Monitoring-type classifier ──────────────────
+                # Monitoring-type classifier 
                 # "Type of monitoring" on this form branches to one of:
                 # Pump house / Tower-Reservoir / PSPs / Private connection /
                 # Solar Array / Distribution line — only the selected
@@ -636,7 +636,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
     return results
 
 
-# ── sync_customers ─────────────────────────────────────────────
+# sync_customers 
 
 def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) -> int:
 
@@ -838,7 +838,7 @@ def _sync_customers_from_accounts(system_id, session, cfg, log, water_system_id=
         return 0
 
 
-# ── reallocate_payments ────────────────────────────────────────
+# reallocate_payments 
 
 def reallocate_payments(system_id: int, session, log: list = None, commit: bool = True) -> int:
 
@@ -887,7 +887,7 @@ def reallocate_payments(system_id: int, session, log: list = None, commit: bool 
     return updated
 
 
-# ── sync_billing ───────────────────────────────────────────────
+# sync_billing 
 
 def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
 
@@ -1006,7 +1006,7 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
         return 0
 
 
-# ── sync_payments ──────────────────────────────────────────────
+# sync_payments 
 
 def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
 
@@ -1176,7 +1176,7 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
         return 0
 
 
-# ── sync_expenses ──────────────────────────────────────────────
+# sync_expenses 
 
 def sync_expenses(system_id, session, cfg, log) -> int:
 
@@ -1247,7 +1247,7 @@ def sync_expenses(system_id, session, cfg, log) -> int:
         return 0
 
 
-# ── recalculate_nrw ────────────────────────────────────────────
+# recalculate_nrw 
 
 def recalculate_nrw(system_id: int, session) -> None:
     readings = session.query(DailyReading).filter_by(system_id=system_id).all()
@@ -1282,7 +1282,7 @@ def recalculate_nrw(system_id: int, session) -> None:
     session.commit()
 
 
-# ── _fetch_all_transactions ────────────────────────────────────
+# _fetch_all_transactions
 
 def _fetch_all_accounts_entities(accounts_base: str, accounts_key: str, path: str) -> list[dict]:
     """Paginated fetch for /customers or /customer_accounts.
