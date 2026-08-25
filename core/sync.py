@@ -25,7 +25,7 @@ except ImportError:
     _SYNCLOG_AVAILABLE = False
 
 
-# Karungu (system 1) fallback constants
+# ── Karungu (system 1) fallback constants ─────────────────────
 
 _DEFAULT_GROUP_ID        = "718ce61fbf4f4742bd1018cabf90d1e8"
 _DEFAULT_WATER_SYSTEM_ID = "b0e76a15-7047-4c5e-a986-e2bba550a4ff"
@@ -112,7 +112,7 @@ def _infer_connection_type(name: str, wp_type: str = None) -> str:
     return "PSP"
 
 
-# Config helpers
+# ── Config helpers ─────────────────────────────────────────────
 
 def get_mwater_config(system: WaterSystem = None) -> dict:
     try:
@@ -225,7 +225,7 @@ def _write_sync_log(session, system_id, triggered_by, status,
         pass
 
 
-# Main entry point 
+# ── Main entry point ───────────────────────────────────────────
 
 def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") -> dict:
     t_start = time.time()
@@ -265,7 +265,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             session.close()
             return {"error": err_msg, "system": system_name}
 
-        # Fetch mWater responses 
+        # ── Fetch mWater responses ─────────────────────────────
         log_msg("Fetching mWater responses...")
         all_responses = []
         skip = 0
@@ -364,7 +364,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             try:
                 data = r.get("data", {})
 
-                # Water-system filter 
+                # ── Water-system filter ──────────────────────────
                 # This form is shared across multiple water systems
                 # ("Select the Water system" is a question on the
                 # form, not implied by form_id). Without this check,
@@ -387,7 +387,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 pe   = safe_float(data.get(pump_end_fid))
                 te   = safe_float(data.get(tank_end_fid))
 
-                # Monitoring-type classifier 
+                # ── Monitoring-type classifier ──────────────────
                 # "Type of monitoring" on this form branches to one of:
                 # Pump house / Tower-Reservoir / PSPs / Private connection /
                 # Solar Array / Distribution line — only the selected
@@ -636,7 +636,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
     return results
 
 
-# sync_customers 
+# ── sync_customers ─────────────────────────────────────────────
 
 def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) -> int:
 
@@ -693,43 +693,32 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
 
         if cfg.get("accounts_key") and cfg.get("accounts_base"):
             try:
-                r2 = requests.get(
-                    f"{cfg['accounts_base']}/customer_accounts",
-                    params={"client": cfg["accounts_key"], "limit": 200},
-                    timeout=15,
-                )
-                r3 = requests.get(
-                    f"{cfg['accounts_base']}/customers",
-                    params={"client": cfg["accounts_key"], "limit": 200},
-                    timeout=15,
-                )
-                if r2.status_code == 200 and r3.status_code == 200:
-                    r3_data = r3.json()
-                    r2_data = r2.json()
+                r3_data = _fetch_all_accounts_entities(cfg["accounts_base"], cfg["accounts_key"], "customers")
+                r2_data = _fetch_all_accounts_entities(cfg["accounts_base"], cfg["accounts_key"], "customer_accounts")
 
-                    mw_customers = {c["_id"]: c.get("code", "") for c in r3_data}
+                mw_customers = {c["_id"]: c.get("code", "") for c in r3_data}
 
-                    for ca in r2_data:
-                        cust_id  = ca.get("customer", "")
-                        kr_code  = mw_customers.get(cust_id, "")
-                        acc_code = ca.get("code", "")
-                        meter_no = meter_code_map.get(kr_code, "")
-                        if meter_no and acc_code:
-                            meter_to_account[meter_no] = acc_code
+                for ca in r2_data:
+                    cust_id  = ca.get("customer", "")
+                    kr_code  = mw_customers.get(cust_id, "")
+                    acc_code = ca.get("code", "")
+                    meter_no = meter_code_map.get(kr_code, "")
+                    if meter_no and acc_code:
+                        meter_to_account[meter_no] = acc_code
 
-                    # Build name → 433xxx account code (not KR code)
-                    cust_id_to_name = {
-                        c["_id"]: (c.get("name") or "").lower().strip()
-                        for c in r3_data
-                    }
-                    for ca in r2_data:
-                        cust_id  = ca.get("customer", "")
-                        acc_code = ca.get("code", "")
-                        name     = cust_id_to_name.get(cust_id, "")
-                        if name and acc_code:
-                            acc_name_to_code[name] = acc_code
+                # Build name → 433xxx account code (not KR code)
+                cust_id_to_name = {
+                    c["_id"]: (c.get("name") or "").lower().strip()
+                    for c in r3_data
+                }
+                for ca in r2_data:
+                    cust_id  = ca.get("customer", "")
+                    acc_code = ca.get("code", "")
+                    name     = cust_id_to_name.get(cust_id, "")
+                    if name and acc_code:
+                        acc_name_to_code[name] = acc_code
 
-                    log_msg(f"  Accounts name index: {len(acc_name_to_code)} entries")
+                log_msg(f"  Accounts name index: {len(acc_name_to_code)} entries")
 
             except Exception as e:
                 log_msg(f"  Accounts lookup error: {e}")
@@ -815,16 +804,7 @@ def _sync_customers_from_accounts(system_id, session, cfg, log, water_system_id=
             log.append(msg)
 
     try:
-        r = requests.get(
-            f"{cfg['accounts_base']}/customers",
-            params={"client": cfg["accounts_key"], "limit": 200},
-            timeout=15,
-        )
-        if r.status_code != 200:
-            log_msg(f"  Accounts customers error: {r.status_code}")
-            return 0
-
-        acc_customers = r.json()
+        acc_customers = _fetch_all_accounts_entities(cfg["accounts_base"], cfg["accounts_key"], "customers")
         log_msg(f"  Accounts API customers: {len(acc_customers)}")
         log_msg(f"  Customers to process  : {len(acc_customers)}")
 
@@ -858,7 +838,7 @@ def _sync_customers_from_accounts(system_id, session, cfg, log, water_system_id=
         return 0
 
 
-# reallocate_payments 
+# ── reallocate_payments ────────────────────────────────────────
 
 def reallocate_payments(system_id: int, session, log: list = None, commit: bool = True) -> int:
 
@@ -907,7 +887,7 @@ def reallocate_payments(system_id: int, session, log: list = None, commit: bool 
     return updated
 
 
-# sync_billing 
+# ── sync_billing ───────────────────────────────────────────────
 
 def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
 
@@ -923,17 +903,7 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
 
     try:
         all_txns = _fetch_all_transactions(cfg["accounts_base"], cfg["accounts_key"])
-
-        r2 = requests.get(f"{cfg['accounts_base']}/customer_accounts",
-                          params={"client": cfg["accounts_key"], "limit": 50}, timeout=15)
-        r3 = requests.get(f"{cfg['accounts_base']}/customers",
-                          params={"client": cfg["accounts_key"], "limit": 50}, timeout=15)
-
-        mw_customers = {c["_id"]: c.get("code") for c in (r3.json() if r3.status_code == 200 else [])}
-        acc_to_kr    = {
-            ca["_id"]: mw_customers.get(ca.get("customer", ""), "")
-            for ca in (r2.json() if r2.status_code == 200 else [])
-        }
+        mw_customers, acc_to_kr = _fetch_customer_account_maps(cfg["accounts_base"], cfg["accounts_key"])
 
         billing_txns = [t for t in all_txns if t.get("meter_volume") is not None]
         payment_txns = [t for t in all_txns if t.get("meter_volume") is None and t.get("customer_account")]
@@ -1036,7 +1006,7 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
         return 0
 
 
-# sync_payments 
+# ── sync_payments ──────────────────────────────────────────────
 
 def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
 
@@ -1051,17 +1021,7 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
 
     try:
         all_txns = _fetch_all_transactions(cfg["accounts_base"], cfg["accounts_key"])
-
-        r2 = requests.get(f"{cfg['accounts_base']}/customer_accounts",
-                          params={"client": cfg["accounts_key"], "limit": 50}, timeout=15)
-        r3 = requests.get(f"{cfg['accounts_base']}/customers",
-                          params={"client": cfg["accounts_key"], "limit": 50}, timeout=15)
-
-        mw_customers = {c["_id"]: c.get("code") for c in (r3.json() if r3.status_code == 200 else [])}
-        acc_to_kr    = {
-            ca["_id"]: mw_customers.get(ca.get("customer", ""), "")
-            for ca in (r2.json() if r2.status_code == 200 else [])
-        }
+        mw_customers, acc_to_kr = _fetch_customer_account_maps(cfg["accounts_base"], cfg["accounts_key"])
 
         payment_txns = [t for t in all_txns if t.get("meter_volume") is None and t.get("customer_account")]
 
@@ -1216,7 +1176,7 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
         return 0
 
 
-# sync_expenses
+# ── sync_expenses ──────────────────────────────────────────────
 
 def sync_expenses(system_id, session, cfg, log) -> int:
 
@@ -1287,7 +1247,7 @@ def sync_expenses(system_id, session, cfg, log) -> int:
         return 0
 
 
-# recalculate_nrw 
+# ── recalculate_nrw ────────────────────────────────────────────
 
 def recalculate_nrw(system_id: int, session) -> None:
     readings = session.query(DailyReading).filter_by(system_id=system_id).all()
@@ -1322,7 +1282,57 @@ def recalculate_nrw(system_id: int, session) -> None:
     session.commit()
 
 
-# _fetch_all_transactions
+# ── _fetch_all_transactions ────────────────────────────────────
+
+def _fetch_all_accounts_entities(accounts_base: str, accounts_key: str, path: str) -> list[dict]:
+    """Paginated fetch for /customers or /customer_accounts.
+
+    Mirrors _fetch_all_transactions exactly. The four call sites that
+    used to fetch these endpoints directly (sync_customers,
+    _sync_customers_from_accounts, sync_billing, sync_payments) each
+    did a single-page request with limit=50 or limit=200 and no
+    pagination loop — silently dropping any customer/account past
+    that page for systems with more than that many. Karungu (27
+    customers) never triggered it; Nyakabale-Kibibira (66+) did.
+    """
+    all_items: list[dict] = []
+    skip  = 0
+    limit = 200
+    while True:
+        r = requests.get(
+            f"{accounts_base}/{path}",
+            params={"client": accounts_key, "limit": limit, "skip": skip},
+            timeout=30,
+        )
+        if r.status_code != 200 or not r.text.strip():
+            break
+        batch = r.json()
+        if not batch:
+            break
+        all_items.extend(batch)
+        if len(batch) < limit:
+            break
+        skip += limit
+    return all_items
+
+
+def _fetch_customer_account_maps(accounts_base: str, accounts_key: str) -> tuple[dict, dict]:
+    """Returns (mw_customers, acc_to_kr), fully paginated.
+
+    mw_customers : customer _id -> their KR code
+    acc_to_kr    : customer_account _id -> the KR code of the
+                   customer that account belongs to
+    """
+    customers        = _fetch_all_accounts_entities(accounts_base, accounts_key, "customers")
+    customer_accounts = _fetch_all_accounts_entities(accounts_base, accounts_key, "customer_accounts")
+
+    mw_customers = {c["_id"]: c.get("code") for c in customers}
+    acc_to_kr    = {
+        ca["_id"]: mw_customers.get(ca.get("customer", ""), "")
+        for ca in customer_accounts
+    }
+    return mw_customers, acc_to_kr
+
 
 def _fetch_all_transactions(accounts_base: str, accounts_key: str) -> list[dict]:
     all_txns: list[dict] = []
