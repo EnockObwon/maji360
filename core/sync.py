@@ -179,6 +179,7 @@ def get_last_end_readings(system_id: int, session) -> tuple[float | None, float 
         pump_row = session.execute(sql_text(
             "SELECT pump_end_reading FROM daily_readings "
             "WHERE system_id = :sid AND pump_end_reading IS NOT NULL "
+            "AND (is_orphaned IS NULL OR is_orphaned = false) "
             "ORDER BY reading_date DESC LIMIT 1"
         ), {"sid": system_id}).fetchone()
         last_pump_end = float(pump_row[0]) if pump_row else None
@@ -188,12 +189,74 @@ def get_last_end_readings(system_id: int, session) -> tuple[float | None, float 
         tank_row = session.execute(sql_text(
             "SELECT tank_end_reading FROM daily_readings "
             "WHERE system_id = :sid AND tank_end_reading IS NOT NULL "
+            "AND (is_orphaned IS NULL OR is_orphaned = false) "
             "ORDER BY reading_date DESC LIMIT 1"
         ), {"sid": system_id}).fetchone()
         last_tank_end = float(tank_row[0]) if tank_row else None
     except Exception:
         last_tank_end = None
     return last_pump_end, last_tank_end
+
+
+def _get_adjacent_reading(session, system_id: int, column: str, reading_date, before: bool) -> tuple[float | None, int | None]:
+    """Find the nearest OTHER reading in the given direction for a
+    specific meter column, excluding orphaned rows.
+
+    Used to compute each new reading's diff against its TRUE
+    chronological neighbor by date, rather than assuming responses
+    always arrive and get processed in strict append order — which
+    breaks whenever a response is backfilled, delayed by mWater's
+    admin-approval gate, or (as found 2026-08) temporarily hidden by
+    cross-system misattribution. Any of those can cause a response to
+    become visible to a sync run out of true date order relative to
+    what's already stored.
+    """
+    if column not in ("pump_end_reading", "tank_end_reading"):
+        raise ValueError(f"invalid column: {column}")
+    op    = "<" if before else ">"
+    order = "DESC" if before else "ASC"
+    try:
+        row = session.execute(sql_text(f"""
+            SELECT {column}, id FROM daily_readings
+            WHERE system_id = :sid
+              AND {column} IS NOT NULL
+              AND reading_date {op} :rd
+              AND (is_orphaned IS NULL OR is_orphaned = false)
+            ORDER BY reading_date {order}
+            LIMIT 1
+        """), {"sid": system_id, "rd": reading_date}).fetchone()
+    except Exception:
+        return None, None
+    if not row:
+        return None, None
+    return float(row[0]), row[1]
+
+
+def _fix_next_reading(session, system_id: int, column: str, produced_column: str,
+                       reading_date, new_value: float, log_msg) -> None:
+    """After inserting a reading, check whether an existing LATER
+    reading in the same chain was computed against a stale
+    predecessor — this happens whenever the reading just inserted
+    arrived after its true successor was already synced (a backfill).
+    If so, correct that row's stored value in place so it reflects
+    the true gap, not the gap against whatever was previously (and
+    now incorrectly) treated as its predecessor.
+    """
+    next_val, next_id = _get_adjacent_reading(session, system_id, column, reading_date, before=False)
+    if next_val is None:
+        return
+    diff = round(next_val - new_value, 2)
+    correct = diff if diff > 0 else 0.0
+    try:
+        session.execute(sql_text(
+            f"UPDATE daily_readings SET {produced_column} = :val WHERE id = :id"
+        ), {"val": correct, "id": next_id})
+        log_msg(
+            f"  ↻ Corrected downstream reading (id={next_id}) after "
+            f"backfill: {produced_column} recalculated to {correct}"
+        )
+    except Exception as e:
+        log_msg(f"  ✗ Failed to correct downstream reading id={next_id}: {e}")
 
 
 def _write_sync_log(session, system_id, triggered_by, status,
@@ -268,6 +331,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         # Fetch mWater responses 
         log_msg("Fetching mWater responses...")
         all_responses = []
+        fetch_complete = False
         skip = 0
         while True:
             try:
@@ -295,6 +359,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 # it, silently truncating the fetch before it reaches
                 # the newest responses.
                 if len(raw_page) < 100:
+                    fetch_complete = True
                     break
                 skip += 100
             except Exception as e:
@@ -424,29 +489,41 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 except Exception:
                     reading_date = datetime.now(timezone.utc)
 
+                # Look up each meter's TRUE immediately-preceding
+                # reading by date, not "whatever this run's in-memory
+                # variable currently holds". The latter assumes
+                # responses always arrive in strict chronological
+                # append order, which breaks for backfills, delayed
+                # admin-approval, or cross-system misattribution —
+                # exactly what corrupted several of Karungu's
+                # July/August values before this fix.
                 pumped = 0.0
                 if pe is not None:
-                    if last_pump_end is not None:
-                        diff = round(pe - last_pump_end, 2)
+                    prev_pump, _ = _get_adjacent_reading(
+                        session, system_id, "pump_end_reading", reading_date, before=True
+                    )
+                    if prev_pump is not None:
+                        diff = round(pe - prev_pump, 2)
                         if diff > 0:
                             pumped = diff
                         elif diff < 0:
-                            log_msg(f"  ⚠ Pump meter went backwards ({last_pump_end} → {pe}) — skipping.")
+                            log_msg(f"  ⚠ Pump meter went backwards ({prev_pump} → {pe}) — skipping.")
                     else:
                         log_msg(f"  First pump baseline: {pe}")
-                    last_pump_end = pe
 
                 consumed = 0.0
                 if te is not None:
-                    if last_tank_end is not None:
-                        diff = round(te - last_tank_end, 2)
+                    prev_tank, _ = _get_adjacent_reading(
+                        session, system_id, "tank_end_reading", reading_date, before=True
+                    )
+                    if prev_tank is not None:
+                        diff = round(te - prev_tank, 2)
                         if diff > 0:
                             consumed = diff
                         elif diff < 0:
-                            log_msg(f"  ⚠ Tank meter went backwards ({last_tank_end} → {te}) — skipping.")
+                            log_msg(f"  ⚠ Tank meter went backwards ({prev_tank} → {te}) — skipping.")
                     else:
                         log_msg(f"  First tank baseline: {te}")
-                    last_tank_end = te
 
                 if pe is None and te is None:
                     continue
@@ -509,6 +586,22 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                     if pumped   > 0: new_pump += 1
                     if consumed > 0: new_tank += 1
 
+                    # This response landed successfully — now check
+                    # whether it filled a gap in front of an existing
+                    # LATER reading whose stored value was computed
+                    # against a stale (too-distant) predecessor. If
+                    # so, correct that downstream row too.
+                    if pe is not None:
+                        _fix_next_reading(
+                            session, system_id, "pump_end_reading",
+                            "water_produced_m3", reading_date, pe, log_msg
+                        )
+                    if te is not None:
+                        _fix_next_reading(
+                            session, system_id, "tank_end_reading",
+                            "water_consumed_m3", reading_date, te, log_msg
+                        )
+
             except Exception as e:
                 processing_errors += 1
                 log_msg(f"  ✗ Failed to process response {resp_id[:8] if resp_id else '?'}: {e}")
@@ -518,15 +611,16 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         log_msg(f"New pump readings : {new_pump}")
         log_msg(f"New tank readings : {new_tank}")
         log_msg(f"Duplicates skipped: {duplicates}")
-        # last_pump_end/last_tank_end were updated in-place throughout
-        # the loop above as each genuinely new response was processed,
-        # so by this point they hold the CURRENT values, not the
-        # pre-run baseline printed earlier in this log. Stating them
-        # explicitly here avoids the exact confusion of reading the
-        # early "Last pump end" line as if it were the result — it's
-        # the starting point, this line is the actual outcome.
-        log_msg(f"Pump end after this run  : {last_pump_end}")
-        log_msg(f"Tank end after this run  : {last_tank_end}")
+        # Re-queried after the loop rather than trusting an in-loop
+        # running variable. Diffs are now computed per-response via
+        # _get_adjacent_reading (true predecessor by date), so nothing
+        # in the loop tracks a single running "latest" value anymore —
+        # and a backfilled response can legitimately land BEFORE the
+        # current latest without changing what "latest" actually is.
+        # Querying fresh is the only way this stays correct.
+        pump_end_after, tank_end_after = get_last_end_readings(system_id, session)
+        log_msg(f"Pump end after this run  : {pump_end_after}")
+        log_msg(f"Tank end after this run  : {tank_end_after}")
         if other_water_system:
             log_msg(
                 f"  ({other_water_system} response(s) were submitted for a "
@@ -563,6 +657,55 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 f"— PSPs/Private connection/Solar/Distribution — no pump/tank data "
                 f"expected, not an error)"
             )
+
+        # Orphan detection 
+        # Mirrors the existing pattern in sync_billing/sync_payments.
+        # Only runs when the fetch above completed naturally — if it
+        # was cut short by an API error, all_responses is an
+        # incomplete set and comparing against it would falsely flag
+        # every reading the fetch didn't reach as deleted.
+        newly_orphaned = 0
+        if not fetch_complete:
+            log_msg("  (skipping orphan check — response fetch did not complete cleanly)")
+        else:
+            current_response_ids = {
+                r.get("_id", r.get("id", "")) for r in all_responses if r.get("_id") or r.get("id")
+            }
+            try:
+                tracked_readings = session.execute(sql_text(
+                    "SELECT id, mwater_response_id, reading_date, is_orphaned "
+                    "FROM daily_readings WHERE system_id = :sid "
+                    "AND mwater_response_id IS NOT NULL"
+                ), {"sid": system_id}).fetchall()
+            except Exception:
+                tracked_readings = []
+
+            for row in tracked_readings:
+                reading_id, resp_id_tracked, r_date, was_orphaned = row
+                now_missing = resp_id_tracked not in current_response_ids
+
+                if now_missing and not was_orphaned:
+                    log_msg(
+                        f"  🚩 Possible deletion: reading on {r_date} "
+                        f"(response {resp_id_tracked[:8]}) no longer found "
+                        f"in mWater — flagged for review."
+                    )
+                    newly_orphaned += 1
+
+                if now_missing != bool(was_orphaned):
+                    session.execute(sql_text(
+                        "UPDATE daily_readings SET is_orphaned = :v WHERE id = :id"
+                    ), {"v": now_missing, "id": reading_id})
+                    if was_orphaned and not now_missing:
+                        log_msg(f"  ✓ Reading {reading_id} no longer orphaned")
+
+            if newly_orphaned:
+                log_msg(
+                    f"  🚩 {newly_orphaned} reading(s) newly flagged — "
+                    f"review in Data Quality. Not deleted or excluded from "
+                    f"totals automatically; confirm before correcting."
+                )
+            session.commit()
 
         log_msg("Syncing customers from mWater...")
         new_customers = sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log)
@@ -608,6 +751,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             "processing_errors":     processing_errors,
             "cross_system_conflicts": cross_system_conflicts,
             "other_water_system":     other_water_system,
+            "newly_orphaned_readings": newly_orphaned,
             "synced_at":             datetime.now(timezone.utc).isoformat(),
         }
         _write_sync_log(session, system_id, triggered_by, status, results, duration, log or [])
@@ -1282,7 +1426,7 @@ def recalculate_nrw(system_id: int, session) -> None:
     session.commit()
 
 
-# _fetch_all_transactions
+# _fetch_all_transactions 
 
 def _fetch_all_accounts_entities(accounts_base: str, accounts_key: str, path: str) -> list[dict]:
     """Paginated fetch for /customers or /customer_accounts.
