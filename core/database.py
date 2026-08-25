@@ -177,6 +177,14 @@ class DailyReading(Base):
     mwater_response_id = Column(String, unique=True)
     synced_at          = Column(DateTime, default=datetime.utcnow)
 
+    # mWater reconciliation tracking
+    # is_orphaned : set TRUE by sync when a reading's
+    # mwater_response_id can no longer be found among current
+    # mWater responses for this form (e.g. operator/admin deleted
+    # a mistaken entry). Never auto-deleted — surfaced for manual
+    # review/confirmation, same convention as Bill and Payment.
+    is_orphaned        = Column(Boolean, default=False)
+
     system = relationship("WaterSystem", back_populates="readings")
 
 
