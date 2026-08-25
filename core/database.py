@@ -33,10 +33,11 @@ class WaterSystem(Base):
     created_at     = Column(DateTime, default=datetime.utcnow)
 
     # mWater per-system identifiers
-    mwater_group_id        = Column(String(100))
-    mwater_water_system_id = Column(String(100))
-    mwater_field_ids       = Column(JSON)
-    meter_code_map         = Column(JSON)
+    mwater_group_id          = Column(String(100))
+    mwater_water_system_id   = Column(String(100))
+    mwater_water_system_code = Column(String(100))
+    mwater_field_ids         = Column(JSON)
+    meter_code_map           = Column(JSON)
 
     # Per-system accounts API override
     # Leave NULL to use global secrets
