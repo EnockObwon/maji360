@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 from collections import defaultdict
 from sqlalchemy import text as sql_text
-from core.database import get_session, DailyReading, Bill, NRWRecord, Customer
+from core.database import get_session, DailyReading, Bill, NRWRecord, Customer, WaterSystem
 from core.auth import require_login
 
 
@@ -23,12 +23,20 @@ def show():
 
     all_bills = session.query(Bill).filter_by(system_id=system_id).all()
 
-    last_reading = session.query(DailyReading).filter_by(
-        system_id=system_id
-    ).order_by(DailyReading.synced_at.desc()).first()
+    # Read the actual sync timestamp from the system's own row —
+    # sync.py updates water_systems.last_synced_at at the end of
+    # every run, success or failure, regardless of whether any
+    # readings came in. Inferring "last synced" from the most recent
+    # DailyReading (as this used to do) is wrong: a system can sync
+    # successfully — customers, bills, payments, NRW all current —
+    # while genuinely having zero pump/tank readings, which is
+    # Nyakabale-Kibibira's real state right now and will be true for
+    # any newly onboarded system until its first submission. That
+    # isn't "never synced," and shouldn't display as such.
+    water_system = session.query(WaterSystem).filter_by(id=system_id).first()
     last_sync = (
-        last_reading.synced_at.strftime("%d %b %Y %H:%M")
-        if last_reading and last_reading.synced_at else "Never"
+        water_system.last_synced_at.strftime("%d %b %Y %H:%M")
+        if water_system and water_system.last_synced_at else "Never"
     )
 
     total_customers = session.query(Customer).filter_by(
