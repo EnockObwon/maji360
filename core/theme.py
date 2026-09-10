@@ -108,7 +108,8 @@ def apply_theme():
 
 
 def metric_card(label: str, value: str, delta: str | None = None,
-                 delta_positive: bool = True, accent: str = ACCENT) -> str:
+                 delta_positive: bool = True, accent: str = ACCENT,
+                 delta_neutral: bool = False) -> str:
     """Return HTML for one KPI tile — pass to st.markdown(..., unsafe_allow_html=True).
 
     Replaces st.metric() with a card matching the rest of the theme:
@@ -116,15 +117,26 @@ def metric_card(label: str, value: str, delta: str | None = None,
     up/down delta. `accent` lets each KPI carry its own category
     color (e.g. green for Collected, blue for Total billed) the way
     st.metric never could.
+
+    `delta_neutral=True` shows the delta in plain muted text with no
+    arrow or color judgment — matches st.metric(delta_color="off"),
+    for values where a change isn't inherently good or bad (e.g.
+    "Total billed" going up isn't automatically positive or negative).
     """
     delta_html = ""
     if delta:
-        color = SUCCESS if delta_positive else DANGER
-        arrow = "&#9650;" if delta_positive else "&#9660;"  # ▲ / ▼
-        delta_html = (
-            f'<div style="font-size:12px; color:{color}; margin-top:6px;">'
-            f'{arrow} {delta}</div>'
-        )
+        if delta_neutral:
+            delta_html = (
+                f'<div style="font-size:12px; color:{TEXT_SEC}; margin-top:6px;">'
+                f'{delta}</div>'
+            )
+        else:
+            color = SUCCESS if delta_positive else DANGER
+            arrow = "&#9650;" if delta_positive else "&#9660;"  # ▲ / ▼
+            delta_html = (
+                f'<div style="font-size:12px; color:{color}; margin-top:6px;">'
+                f'{arrow} {delta}</div>'
+            )
     return f"""
     <div style="background:{BG_CARD}; border-radius:8px;
                 border-top:3px solid {accent}; padding:14px 16px;
@@ -153,14 +165,27 @@ def style_dark_chart(fig):
     """Apply the shared dark layout to a Plotly figure, preserving
     any axis config the figure already set (merges rather than
     overwrites xaxis/yaxis so existing per-chart settings like
-    showgrid=False or a custom range survive)."""
+    showgrid=False or a custom range survive).
+
+    Also reaches a secondary y-axis (yaxis2) if the figure has one —
+    e.g. a dual-axis combo chart with volume bars on the left axis
+    and a %-based line on the right. fig.update_yaxes() alone only
+    touches the primary axis; secondary_y=True is required for the
+    second one, and calling it on a figure that has no secondary
+    axis is a harmless no-op, so this is safe on every chart.
+    """
     fig.update_layout(
         plot_bgcolor=PLOTLY_DARK_LAYOUT["plot_bgcolor"],
         paper_bgcolor=PLOTLY_DARK_LAYOUT["paper_bgcolor"],
         font=PLOTLY_DARK_LAYOUT["font"],
+        legend=dict(font=dict(color=TEXT_SEC)),
     )
     fig.update_xaxes(gridcolor=BORDER, zerolinecolor=BORDER, color=TEXT_SEC)
     fig.update_yaxes(gridcolor=BORDER, zerolinecolor=BORDER, color=TEXT_SEC)
+    try:
+        fig.update_yaxes(gridcolor=BORDER, zerolinecolor=BORDER, color=TEXT_SEC, secondary_y=True)
+    except Exception:
+        pass  # figure has no secondary axis — nothing to do
     return fig
 
 
