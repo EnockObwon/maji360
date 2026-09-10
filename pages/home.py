@@ -6,6 +6,7 @@ from collections import defaultdict
 from sqlalchemy import text as sql_text
 from core.database import get_session, DailyReading, Bill, NRWRecord, Customer, WaterSystem
 from core.auth import require_login
+from core.theme import metric_card, style_dark_chart, nrw_gauge, ACCENT, SUCCESS, WARNING, DANGER, TEXT_SEC
 
 
 def show():
@@ -246,27 +247,45 @@ def show():
     nrw_pct      = latest_nrw.nrw_percent if latest_nrw else None
     prev_nrw_pct = prev_nrw.nrw_percent   if prev_nrw  else None
 
+    # _delta() already returns a signed string ("+1.2%" / "-1.2%")
+    # when there's a comparable previous period. delta_positive tells
+    # metric_card() which color that sign means — for NRW, a rise is
+    # bad (more unaccounted water), so its polarity is inverted
+    # relative to the others, matching the original delta_color="inverse".
+    nrw_delta_str  = _delta(nrw_pct, prev_nrw_pct) if nrw_pct and prev_nrw_pct else None
+    billed_delta   = _delta(total_billed, prev_billed) if prev_billed else None
+    cash_delta     = _delta(cash_received, prev_cash) if prev_cash else None
+    rate_delta     = _delta(collection_rate, prev_rate) if prev_rate else None
+
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        nrw_delta = _delta(nrw_pct, prev_nrw_pct) if nrw_pct and prev_nrw_pct else None
-        st.metric("NRW rate",
-                  f"{nrw_pct:.1f}%" if nrw_pct else "—",
-                  delta=nrw_delta, delta_color="inverse")
+        st.markdown(metric_card(
+            "NRW rate", f"{nrw_pct:.1f}%" if nrw_pct else "—",
+            delta=nrw_delta_str,
+            delta_positive=(not nrw_delta_str.startswith("+")) if nrw_delta_str else True,
+            accent=DANGER if (nrw_pct or 0) >= 20 else (WARNING if (nrw_pct or 0) >= 15 else SUCCESS),
+        ), unsafe_allow_html=True)
     with c2:
-        st.metric("Customers", total_customers)
+        st.markdown(metric_card("Customers", str(total_customers), accent=ACCENT), unsafe_allow_html=True)
     with c3:
-        st.metric("Total billed",
-                  _fmt(total_billed),
-                  delta=_delta(total_billed, prev_billed) if prev_billed else None)
+        st.markdown(metric_card(
+            "Total billed", _fmt(total_billed), delta=billed_delta,
+            delta_positive=billed_delta.startswith("+") if billed_delta else True,
+            accent=ACCENT,
+        ), unsafe_allow_html=True)
     with c4:
         # Cash received by payment date — matches mWater
-        st.metric("Collected",
-                  _fmt(cash_received),
-                  delta=_delta(cash_received, prev_cash) if prev_cash else None)
+        st.markdown(metric_card(
+            "Collected", _fmt(cash_received), delta=cash_delta,
+            delta_positive=cash_delta.startswith("+") if cash_delta else True,
+            accent=SUCCESS,
+        ), unsafe_allow_html=True)
     with c5:
-        st.metric("Collection rate",
-                  f"{collection_rate}%",
-                  delta=_delta(collection_rate, prev_rate) if prev_rate else None)
+        st.markdown(metric_card(
+            "Collection rate", f"{collection_rate}%", delta=rate_delta,
+            delta_positive=rate_delta.startswith("+") if rate_delta else True,
+            accent=ACCENT,
+        ), unsafe_allow_html=True)
 
     st.divider()
 
@@ -293,15 +312,15 @@ def show():
                 x=values, y=names, orientation="h",
                 marker_color=colours,
                 text=[f"{currency} {v:,.0f}" for v in values],
-                textposition="outside", textfont=dict(size=11),
+                textposition="outside", textfont=dict(size=11, color=TEXT_SEC),
             ))
             fig_bar.update_layout(
                 height=max(220, len(names) * 42),
                 margin=dict(t=4, b=4, l=4, r=80),
-                plot_bgcolor="white", paper_bgcolor="white",
                 xaxis=dict(showticklabels=False, showgrid=False, range=[0, max_v * 1.35]),
                 yaxis=dict(autorange="reversed", showgrid=False),
             )
+            style_dark_chart(fig_bar)
             st.plotly_chart(fig_bar, use_container_width=True)
             st.markdown(
                 "<span style='font-size:11px;color:#64748b'>"
@@ -348,12 +367,12 @@ def show():
             fig_flow.update_layout(
                 barmode="group", height=260,
                 margin=dict(t=4, b=4, l=0, r=0),
-                plot_bgcolor="white", paper_bgcolor="white",
-                yaxis=dict(title="m³", gridcolor="#f1f5f9", dtick=5),
-                xaxis=dict(gridcolor="#f1f5f9", tickangle=-35),
+                yaxis=dict(title="m³", dtick=5),
+                xaxis=dict(tickangle=-35),
                 legend=dict(orientation="h", yanchor="bottom",
                             y=1.02, xanchor="left", x=0, font=dict(size=11)),
             )
+            style_dark_chart(fig_flow)
             st.plotly_chart(fig_flow, use_container_width=True)
         else:
             st.info("No readings synced yet.")
@@ -366,38 +385,5 @@ def show():
         st.caption(f"Non-revenue water — {latest_nrw.month} · Target: below 20%")
 
         nrw_val = latest_nrw.nrw_percent or 0
-        fig_gauge = go.Figure(go.Indicator(
-            mode  = "gauge+number+delta",
-            value = nrw_val,
-            delta = {
-                "reference":  prev_nrw_pct,
-                "increasing": {"color": "#ef4444"},
-                "decreasing": {"color": "#22c55e"},
-            } if prev_nrw_pct else {},
-            number = {"suffix": "%", "font": {"size": 36}},
-            gauge  = {
-                "axis": {
-                    "range": [0, 60], "tickwidth": 1,
-                    "tickcolor": "#94a3b8",
-                    "tickvals": [0, 10, 20, 30, 40, 50, 60],
-                },
-                "bar": {"color": "#ef4444" if nrw_val >= 20 else "#22c55e", "thickness": 0.25},
-                "bgcolor": "white", "borderwidth": 0,
-                "steps": [
-                    {"range": [0,  20], "color": "#f0fdf4"},
-                    {"range": [20, 35], "color": "#fef9c3"},
-                    {"range": [35, 60], "color": "#fef2f2"},
-                ],
-                "threshold": {
-                    "line": {"color": "#f59e0b", "width": 3},
-                    "thickness": 0.8, "value": 20,
-                },
-            },
-            title = {"text": "NRW %", "font": {"size": 14, "color": "#64748b"}},
-        ))
-        fig_gauge.update_layout(
-            height=260,
-            margin=dict(t=20, b=10, l=40, r=40),
-            paper_bgcolor="white",
-        )
+        fig_gauge = nrw_gauge(nrw_val, target=20.0, prev_value=prev_nrw_pct)
         st.plotly_chart(fig_gauge, use_container_width=True)
