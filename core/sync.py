@@ -433,7 +433,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             try:
                 data = r.get("data", {})
 
-                # Water-system filter 
+                # Water-system filter
                 # This form is shared across multiple water systems
                 # ("Select the Water system" is a question on the
                 # form, not implied by form_id). Without this check,
@@ -662,13 +662,17 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 f"expected, not an error)"
             )
 
-        # Orphan detection 
+        # Orphan detection
         # Mirrors the existing pattern in sync_billing/sync_payments.
         # Only runs when the fetch above completed naturally — if it
         # was cut short by an API error, all_responses is an
         # incomplete set and comparing against it would falsely flag
         # every reading the fetch didn't reach as deleted.
         newly_orphaned = 0
+        newly_restored = 0
+        MAX_ORPHAN_SAMPLES = 5  # avoid flooding the log on a bulk change
+        orphan_samples  = []
+        restore_samples = []
         if not fetch_complete:
             log_msg("  (skipping orphan check — response fetch did not complete cleanly)")
         else:
@@ -689,26 +693,46 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 now_missing = resp_id_tracked not in current_response_ids
 
                 if now_missing and not was_orphaned:
-                    log_msg(
-                        f"  🚩 Possible deletion: reading on {r_date} "
-                        f"(response {resp_id_tracked[:8]}) no longer found "
-                        f"in mWater — flagged for review."
-                    )
                     newly_orphaned += 1
+                    if len(orphan_samples) < MAX_ORPHAN_SAMPLES:
+                        orphan_samples.append(
+                            f"  🚩 Possible deletion: reading on {r_date} "
+                            f"(response {resp_id_tracked[:8]}) no longer found "
+                            f"in mWater — flagged for review."
+                        )
 
                 if now_missing != bool(was_orphaned):
                     session.execute(sql_text(
                         "UPDATE daily_readings SET is_orphaned = :v WHERE id = :id"
                     ), {"v": now_missing, "id": reading_id})
                     if was_orphaned and not now_missing:
-                        log_msg(f"  ✓ Reading {reading_id} no longer orphaned")
+                        newly_restored += 1
+                        if len(restore_samples) < MAX_ORPHAN_SAMPLES:
+                            restore_samples.append(f"  ✓ Reading {reading_id} no longer orphaned")
 
+            for line in orphan_samples:
+                log_msg(line)
             if newly_orphaned:
                 log_msg(
                     f"  🚩 {newly_orphaned} reading(s) newly flagged — "
                     f"review in Data Quality. Not deleted or excluded from "
                     f"totals automatically; confirm before correcting."
                 )
+
+            for line in restore_samples:
+                log_msg(line)
+            if newly_restored:
+                log_msg(
+                    f"  ✓ {newly_restored} reading(s) no longer orphaned "
+                    f"(source response reappeared in mWater)."
+                )
+                if newly_restored >= 10:
+                    log_msg(
+                        f"     A large batch un-flagging at once usually means "
+                        f"an earlier run's fetch was briefly incomplete, not "
+                        f"that these were ever really deleted — self-corrected, "
+                        f"no action needed unless this repeats often."
+                    )
             session.commit()
 
         log_msg("Syncing customers from mWater...")
@@ -1126,18 +1150,23 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
             ).all()
 
             newly_orphaned = 0
+            MAX_ORPHAN_SAMPLES = 5
+            orphan_samples = []
             for b in tracked_bills:
                 if b.mwater_id not in current_billing_ids:
                     if not b.is_orphaned:
                         cust = session.query(Customer).filter_by(id=b.customer_id).first()
-                        log_msg(
-                            f"  🚩 Possible deletion: Bill {b.bill_month} for "
-                            f"{cust.account_no if cust else '?'} "
-                            f"(amount {b.amount:,.0f}) — flagged for review."
-                        )
                         newly_orphaned += 1
+                        if len(orphan_samples) < MAX_ORPHAN_SAMPLES:
+                            orphan_samples.append(
+                                f"  🚩 Possible deletion: Bill {b.bill_month} for "
+                                f"{cust.account_no if cust else '?'} "
+                                f"(amount {b.amount:,.0f}) — flagged for review."
+                            )
                     b.is_orphaned = True
 
+            for line in orphan_samples:
+                log_msg(line)
             if newly_orphaned:
                 log_msg(f"  🚩 {newly_orphaned} bill(s) newly flagged — review in Data Quality")
             session.commit()
@@ -1211,24 +1240,34 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
                 continue
 
             try:
-                session.execute(sql_text("""
-                    INSERT INTO payments
-                        (system_id, customer_id, amount, payment_method,
-                         notes, paid_at, status, transaction_id, is_orphaned)
-                    VALUES
-                        (:system_id, :customer_id, :amount, :method,
-                         :notes, :paid_at, 'completed', :transaction_id, false)
-                """), {
-                    "system_id":      system_id,
-                    "customer_id":    customer.id,
-                    "amount":         amount,
-                    "method":         "Cash",
-                    "notes":          notes,
-                    "paid_at":        f"{date_only}T00:00:00+00:00",
-                    "transaction_id": mwater_id or None,
-                })
-                existing_payments.add(key)
-                new_payments += 1
+                # SAVEPOINT: a duplicate transaction_id (or any other
+                # error) on one payment must not poison the rest of
+                # this session's transaction — that's exactly what
+                # cascaded into breaking every subsequent expense
+                # insert in a run where this wasn't protected.
+                with session.begin_nested():
+                    result = session.execute(sql_text("""
+                        INSERT INTO payments
+                            (system_id, customer_id, amount, payment_method,
+                             notes, paid_at, status, transaction_id, is_orphaned)
+                        VALUES
+                            (:system_id, :customer_id, :amount, :method,
+                             :notes, :paid_at, 'completed', :transaction_id, false)
+                        ON CONFLICT (transaction_id) DO NOTHING
+                        RETURNING id
+                    """), {
+                        "system_id":      system_id,
+                        "customer_id":    customer.id,
+                        "amount":         amount,
+                        "method":         "Cash",
+                        "notes":          notes,
+                        "paid_at":        f"{date_only}T00:00:00+00:00",
+                        "transaction_id": mwater_id or None,
+                    })
+                    inserted = result.fetchone()
+                if inserted is not None:
+                    existing_payments.add(key)
+                    new_payments += 1
             except Exception as e:
                 log_msg(f"  Payment insert error: {e}")
 
@@ -1292,27 +1331,41 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
                 tracked_rows = []
 
             newly_orphaned = 0
+            newly_restored = 0
+            MAX_ORPHAN_SAMPLES = 5
+            orphan_samples  = []
+            restore_samples = []
             for row in tracked_rows:
                 pay_id, txn_id, cust_id, amount, was_orphaned = row
                 now_missing = txn_id not in current_payment_ids
 
                 if now_missing and not was_orphaned:
                     cust = session.query(Customer).filter_by(id=cust_id).first()
-                    log_msg(
-                        f"  🚩 Possible deletion: Payment of {amount:,.0f} for "
-                        f"{cust.account_no if cust else '?'} — flagged for review."
-                    )
                     newly_orphaned += 1
+                    if len(orphan_samples) < MAX_ORPHAN_SAMPLES:
+                        orphan_samples.append(
+                            f"  🚩 Possible deletion: Payment of {amount:,.0f} for "
+                            f"{cust.account_no if cust else '?'} — flagged for review."
+                        )
 
                 if now_missing != bool(was_orphaned):
                     session.execute(sql_text(
                         "UPDATE payments SET is_orphaned = :v WHERE id = :id"
                     ), {"v": now_missing, "id": pay_id})
                     if was_orphaned and not now_missing:
-                        log_msg(f"  ✓ Payment {pay_id} no longer orphaned")
+                        newly_restored += 1
+                        if len(restore_samples) < MAX_ORPHAN_SAMPLES:
+                            restore_samples.append(f"  ✓ Payment {pay_id} no longer orphaned")
 
+            for line in orphan_samples:
+                log_msg(line)
             if newly_orphaned:
                 log_msg(f"  🚩 {newly_orphaned} payment(s) newly flagged — review in Data Quality")
+
+            for line in restore_samples:
+                log_msg(line)
+            if newly_restored:
+                log_msg(f"  ✓ {newly_restored} payment(s) no longer orphaned")
             session.commit()
         else:
             log_msg("  (skipping orphan check — no transactions returned from mWater)")
@@ -1372,17 +1425,24 @@ def sync_expenses(system_id, session, cfg, log) -> int:
             date_str = t.get("date", "")
             month    = date_str[:7] if date_str else ""
             try:
-                session.execute(sql_text("""
-                    INSERT INTO expenses (system_id, date, month, amount, category, notes, mwater_id)
-                    VALUES (:system_id, :date, :month, :amount, :category, :notes, :mwater_id)
-                    ON CONFLICT (mwater_id) DO NOTHING
-                """), {
-                    "system_id": system_id, "date": date_str, "month": month,
-                    "amount": float(t.get("amount", 0)), "category": category,
-                    "notes": t.get("notes", ""), "mwater_id": mwater_id,
-                })
-                new_expenses += 1
-                existing.add(mwater_id)
+                # SAVEPOINT: consistent with the same fix applied to
+                # payments — protects against any error here (not just
+                # the conflict already handled) cascading further.
+                with session.begin_nested():
+                    result = session.execute(sql_text("""
+                        INSERT INTO expenses (system_id, date, month, amount, category, notes, mwater_id)
+                        VALUES (:system_id, :date, :month, :amount, :category, :notes, :mwater_id)
+                        ON CONFLICT (mwater_id) DO NOTHING
+                        RETURNING id
+                    """), {
+                        "system_id": system_id, "date": date_str, "month": month,
+                        "amount": float(t.get("amount", 0)), "category": category,
+                        "notes": t.get("notes", ""), "mwater_id": mwater_id,
+                    })
+                    inserted = result.fetchone()
+                if inserted is not None:
+                    new_expenses += 1
+                    existing.add(mwater_id)
             except Exception as e:
                 log_msg(f"  Expense insert error: {e}")
 
@@ -1395,7 +1455,7 @@ def sync_expenses(system_id, session, cfg, log) -> int:
         return 0
 
 
-# recalculate_nrw 
+# recalculate_nrw
 
 def recalculate_nrw(system_id: int, session) -> None:
     readings = session.query(DailyReading).filter_by(system_id=system_id).all()
