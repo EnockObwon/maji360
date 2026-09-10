@@ -5,6 +5,7 @@ from sqlalchemy import text as sql_text
 from core.database import get_session, Bill, Customer
 from core.auth import require_login
 from collections import defaultdict
+from core.theme import metric_card, style_dark_chart, ACCENT, SUCCESS, DANGER, TEXT_SEC
 
 
 def show():
@@ -163,23 +164,36 @@ def show():
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("Total billed",
-                  f"{currency} {total_billed:,.0f}",
-                  delta=_dfmt(d_billed) if d_billed is not None else None,
-                  delta_color="off")
+        # Original used delta_color="off" — a bigger bill total isn't
+        # inherently good or bad, so no arrow/color judgment here.
+        st.markdown(metric_card(
+            "Total billed", f"{currency} {total_billed:,.0f}",
+            delta=_dfmt(d_billed) if d_billed is not None else None,
+            delta_neutral=True, accent=ACCENT,
+        ), unsafe_allow_html=True)
     with c2:
-        st.metric("Total collected",
-                  f"{currency} {cash_received:,.0f}",
-                  delta=_dfmt(d_collected) if d_collected is not None else None)
+        st.markdown(metric_card(
+            "Total collected", f"{currency} {cash_received:,.0f}",
+            delta=_dfmt(d_collected) if d_collected is not None else None,
+            delta_positive=(d_collected >= 0) if d_collected is not None else True,
+            accent=SUCCESS,
+        ), unsafe_allow_html=True)
     with c3:
-        st.metric("Outstanding",
-                  f"{currency} {total_outstanding:,.0f}",
-                  delta=_dfmt(d_outstanding) if d_outstanding is not None else None,
-                  delta_color="inverse")
+        # Original used delta_color="inverse" — rising outstanding
+        # balance is bad, so a positive delta shows as red, not green.
+        st.markdown(metric_card(
+            "Outstanding", f"{currency} {total_outstanding:,.0f}",
+            delta=_dfmt(d_outstanding) if d_outstanding is not None else None,
+            delta_positive=(d_outstanding < 0) if d_outstanding is not None else True,
+            accent=DANGER if total_outstanding > 0 else SUCCESS,
+        ), unsafe_allow_html=True)
     with c4:
-        st.metric("Collection rate",
-                  f"{coll_rate}%",
-                  delta=f"{d_rate:+.1f}pp" if d_rate is not None else None)
+        st.markdown(metric_card(
+            "Collection rate", f"{coll_rate}%",
+            delta=f"{d_rate:+.1f}pp" if d_rate is not None else None,
+            delta_positive=(d_rate >= 0) if d_rate is not None else True,
+            accent=ACCENT,
+        ), unsafe_allow_html=True)
 
     st.caption(
         f"Showing: **{period_label}**"
@@ -227,11 +241,10 @@ def show():
     fig1.update_layout(
         barmode="stack", height=340,
         margin=dict(t=10, b=10, l=0, r=0),
-        plot_bgcolor="white", paper_bgcolor="white",
-        yaxis=dict(title=f"Amount ({currency})", gridcolor="#f1f5f9"),
-        xaxis=dict(gridcolor="#f1f5f9"),
+        yaxis=dict(title=f"Amount ({currency})"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     )
+    style_dark_chart(fig1)
     st.plotly_chart(fig1, use_container_width=True)
     st.divider()
 
@@ -255,12 +268,11 @@ def show():
     fig2.update_layout(
         barmode="group", height=380,
         margin=dict(t=10, b=10, l=0, r=0),
-        plot_bgcolor="white", paper_bgcolor="white",
-        yaxis=dict(title="Consumption (m³)", gridcolor="#f1f5f9"),
-        xaxis=dict(gridcolor="#f1f5f9"),
+        yaxis=dict(title="Consumption (m³)"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="left", x=0, font=dict(size=10))
     )
+    style_dark_chart(fig2)
     st.plotly_chart(fig2, use_container_width=True)
     st.divider()
 
@@ -280,12 +292,11 @@ def show():
     ))
     fig3.update_layout(
         height=300, margin=dict(t=10, b=10, l=0, r=0),
-        plot_bgcolor="white", paper_bgcolor="white",
-        yaxis=dict(title=f"Amount ({currency})", gridcolor="#f1f5f9"),
-        xaxis=dict(gridcolor="#f1f5f9", tickmode="array",
-                   tickvals=all_months, ticktext=all_months),
+        yaxis=dict(title=f"Amount ({currency})"),
+        xaxis=dict(tickmode="array", tickvals=all_months, ticktext=all_months),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     )
+    style_dark_chart(fig3)
     st.plotly_chart(fig3, use_container_width=True)
     st.divider()
 
