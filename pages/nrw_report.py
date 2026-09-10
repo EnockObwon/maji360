@@ -5,6 +5,7 @@ from core.database import get_session, DailyReading
 from core.auth import require_login
 from collections import defaultdict
 from sqlalchemy import text as sql_text
+from core.theme import metric_card, style_dark_chart, ACCENT, SUCCESS, WARNING, DANGER, TEXT_SEC
 
 
 def get_monthly_storage_changes(system_id: int) -> dict:
@@ -89,7 +90,7 @@ def show():
     )
     st.divider()
 
-    # ── Fetch all readings ─────────────────────────────
+    # Fetch all readings 
     session  = get_session()
     readings = session.query(DailyReading).filter(
         DailyReading.system_id == system_id
@@ -100,7 +101,7 @@ def show():
         st.info("No readings available yet.")
         return
 
-    # ── Monthly aggregates ─────────────────────────────
+    # Monthly aggregates 
     monthly = defaultdict(
         lambda: {"pumped": 0.0, "consumed": 0.0}
     )
@@ -142,7 +143,7 @@ def show():
         for n, p in zip(nrw_m3, pumped)
     ]
 
-    # ── Storage changes and maintenance ───────────────
+    # Storage changes and maintenance 
     storage_changes     = get_monthly_storage_changes(
         system_id
     )
@@ -151,7 +152,7 @@ def show():
     )
     has_adjusted        = len(storage_changes) > 0
 
-    # ── Adjusted NRW ───────────────────────────────────
+    # Adjusted NRW 
     adj_nrw_pct = []
     adj_nrw_m3  = []
 
@@ -176,7 +177,7 @@ def show():
         v for v in adj_nrw_pct if v is not None
     ]
 
-    # ── KPI cards ──────────────────────────────────────
+    # KPI cards 
     total_pumped   = sum(pumped)
     total_consumed = sum(consumed)
     total_nrw      = round(
@@ -194,26 +195,25 @@ def show():
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric(
-            "Total pumped",
-            f"{total_pumped:.0f} m³"
-        )
+        st.markdown(metric_card("Total pumped", f"{total_pumped:.0f} m³", accent=ACCENT), unsafe_allow_html=True)
     with c2:
-        st.metric(
-            "Total consumed",
-            f"{total_consumed:.0f} m³"
-        )
+        st.markdown(metric_card("Total consumed", f"{total_consumed:.0f} m³", accent=ACCENT), unsafe_allow_html=True)
     with c3:
-        st.metric("Overall NRW", f"{overall_nrw}%")
+        nrw_accent = DANGER if overall_nrw >= 20 else (WARNING if overall_nrw >= 15 else SUCCESS)
+        st.markdown(metric_card("Overall NRW", f"{overall_nrw}%", accent=nrw_accent), unsafe_allow_html=True)
     with c4:
         if latest_adj is not None:
-            st.metric(
-                "Latest adj NRW",
-                f"{latest_adj}%",
-                delta=f"{round(latest_adj - latest_nrw, 1)}% vs operational"
-            )
+            # This compares adjusted vs operational NRW for the SAME
+            # period — not a period-over-period trend — so it's shown
+            # as plain neutral text rather than a colored up/down
+            # arrow, which would misleadingly imply a time-based change.
+            st.markdown(metric_card(
+                "Latest adj NRW", f"{latest_adj}%",
+                delta=f"{round(latest_adj - latest_nrw, 1)}% vs operational",
+                delta_neutral=True, accent=ACCENT,
+            ), unsafe_allow_html=True)
         else:
-            st.metric("Latest NRW", f"{latest_nrw}%")
+            st.markdown(metric_card("Latest NRW", f"{latest_nrw}%", accent=ACCENT), unsafe_allow_html=True)
 
     if has_adjusted:
         st.success(
@@ -228,7 +228,7 @@ def show():
 
     st.divider()
 
-    # ── Chart 1: Pump vs Tank grouped bar ─────────────
+    # Chart 1: Pump vs Tank grouped bar 
     st.markdown("### Pump vs tank — NRW gap")
     st.caption(
         "Blue = pumped · Green = to consumers · "
@@ -290,20 +290,18 @@ def show():
         y                   = 20,
         line_dash           = "dash",
         line_color          = "#ef4444",
-        opacity             = 0.4,
+        opacity             = 0.6,
         annotation_text     = "20% threshold",
         annotation_position = "top right",
+        annotation_font_color = TEXT_SEC,
         yref                = "y2"
     )
     fig1.update_layout(
         barmode       = "group",
         height        = 400,
         margin        = dict(t=20, b=10, l=0, r=0),
-        plot_bgcolor  = "white",
-        paper_bgcolor = "white",
         yaxis         = dict(
-            title     = "Volume (m³)",
-            gridcolor = "#f1f5f9"
+            title     = "Volume (m³)"
         ),
         yaxis2 = dict(
             title      = "NRW %",
@@ -313,7 +311,6 @@ def show():
             showgrid   = False
         ),
         xaxis  = dict(
-            gridcolor = "#f1f5f9",
             type      = "category"
         ),
         legend = dict(
@@ -324,11 +321,12 @@ def show():
             x           = 0
         )
     )
+    style_dark_chart(fig1)
     st.plotly_chart(fig1, use_container_width=True)
 
     st.divider()
 
-    # ── Chart 2: NRW trend with maintenance ───────────
+    # Chart 2: NRW trend with maintenance 
     st.markdown("### NRW trend over time")
     st.caption(
         "Red = operational NRW · "
@@ -402,21 +400,18 @@ def show():
         y                   = 20,
         line_dash           = "dash",
         line_color          = "#ef4444",
-        opacity             = 0.5,
+        opacity             = 0.7,
         annotation_text     = "20% threshold",
-        annotation_position = "top right"
+        annotation_position = "top right",
+        annotation_font_color = TEXT_SEC
     )
     fig2.update_layout(
         height        = 320,
         margin        = dict(t=20, b=10, l=0, r=0),
-        plot_bgcolor  = "white",
-        paper_bgcolor = "white",
         yaxis         = dict(
-            title     = "NRW %",
-            gridcolor = "#f1f5f9"
+            title     = "NRW %"
         ),
         xaxis  = dict(
-            gridcolor = "#f1f5f9",
             type      = "category"
         ),
         legend = dict(
@@ -427,11 +422,12 @@ def show():
             x           = 0
         )
     )
+    style_dark_chart(fig2)
     st.plotly_chart(fig2, use_container_width=True)
 
     st.divider()
 
-    # ── Monthly breakdown table ────────────────────────
+    # Monthly breakdown table 
     st.markdown("### Monthly breakdown")
 
     rows = []
@@ -480,7 +476,7 @@ def show():
 
     st.divider()
 
-    # ── Annual water balance ───────────────────────────
+    # Annual water balance
     st.markdown("### Annual water balance")
 
     years = sorted(set(m[:4] for m in months))
@@ -508,23 +504,17 @@ def show():
             "🟢 OK"
         )
         with cols[i]:
-            st.metric(
-                f"{year} pumped",
-                f"{yr_pumped:.0f} m³"
-            )
-            st.metric(
-                f"{year} consumed",
-                f"{yr_consumed:.0f} m³"
-            )
-            st.metric(
-                f"{year} NRW",
-                f"{yr_nrw:.0f} m³"
-            )
-            st.metric(
-                f"{year} NRW %",
-                f"{yr_pct}%",
-                delta=status
-            )
+            st.markdown(metric_card(f"{year} pumped", f"{yr_pumped:.0f} m³", accent=ACCENT), unsafe_allow_html=True)
+            st.markdown(metric_card(f"{year} consumed", f"{yr_consumed:.0f} m³", accent=ACCENT), unsafe_allow_html=True)
+            st.markdown(metric_card(f"{year} NRW", f"{yr_nrw:.0f} m³", accent=ACCENT), unsafe_allow_html=True)
+            yr_accent = DANGER if yr_pct >= 20 else (WARNING if yr_pct >= 15 else SUCCESS)
+            # status was never a real trend delta in the original —
+            # just a status label placed in st.metric's delta slot —
+            # so it stays as plain neutral text here too.
+            st.markdown(metric_card(
+                f"{year} NRW %", f"{yr_pct}%",
+                delta=status, delta_neutral=True, accent=yr_accent,
+            ), unsafe_allow_html=True)
 
     st.caption(
         "Annual figures are most reliable as tank "
