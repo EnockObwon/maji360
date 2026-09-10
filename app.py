@@ -4,6 +4,7 @@ from core.auth import (
     login, get_accessible_systems,
     is_super_admin, is_system_admin
 )
+from core.theme import apply_theme
 
 st.set_page_config(
     page_title            = "Maji360",
@@ -73,34 +74,6 @@ st.markdown("""
             padding-right : 0.5rem !important;
         }
     }
-
-    .alert-banner {
-        background    : #fef2f2;
-        border-left   : 4px solid #ef4444;
-        padding       : 10px 16px;
-        border-radius : 4px;
-        margin-bottom : 12px;
-        color         : #991b1b;
-        font-size     : 14px;
-    }
-    .warn-banner {
-        background    : #fffbeb;
-        border-left   : 4px solid #f59e0b;
-        padding       : 10px 16px;
-        border-radius : 4px;
-        margin-bottom : 12px;
-        color         : #92400e;
-        font-size     : 14px;
-    }
-    .ok-banner {
-        background    : #f0fdf4;
-        border-left   : 4px solid #22c55e;
-        padding       : 10px 16px;
-        border-radius : 4px;
-        margin-bottom : 12px;
-        color         : #166534;
-        font-size     : 14px;
-    }
 </style>
 <link rel="manifest" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/manifest.json">
 <meta name="theme-color" content="#0ea5e9">
@@ -110,6 +83,12 @@ st.markdown("""
 <meta name="apple-mobile-web-app-title" content="Maji360">
 <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/EnockObwon/maji360/main/static/icon-192.png">
 """, unsafe_allow_html=True)
+
+# Extends the sidebar's existing dark navy + sky blue accent across
+# the rest of the app — see core/theme.py. Called after the block
+# above so its rules (banners, page background, form controls) take
+# precedence over anything with matching selectors above.
+apply_theme()
 
 
 def _apply_system(systems: list, name: str):
