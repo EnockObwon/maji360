@@ -32,22 +32,25 @@ DANGER      = "#ef4444"
 
 
 def apply_theme():
-    """Inject dark-theme CSS for the main content area.
+    """Inject CSS for the parts Streamlit's own theme engine can't
+    reach: the custom banner classes (alert/warn/ok) used by pages
+    like Home, which are project-specific and unknown to Streamlit.
 
-    Sidebar styling in app.py is untouched — it already matches this
-    palette. This extends the same look to everywhere else: page
-    background, headers, dividers, banners, dataframes, form
-    controls, and Streamlit's built-in st.metric/st.info/etc. so any
-    page not yet migrated to metric_card() still looks consistent.
+    Native widgets — selectboxes, buttons, inputs, tabs, sliders —
+    are themed by .streamlit/config.toml instead of CSS overrides
+    here. That file is what Streamlit's own rendering respects
+    reliably; guessing at BaseWeb's internal DOM structure via
+    injected CSS (an earlier version of this function did that) is
+    fragile and is exactly what left the mobile nav's "System"/"Home"
+    dropdowns and "Sign out" button rendering white against the dark
+    background — Streamlit's internal markup for those controls
+    didn't match the selectors being overridden. Trust config.toml
+    for anything Streamlit renders itself; only add CSS here for
+    things this project defines that Streamlit has no theme concept
+    of at all.
     """
     st.markdown(f"""
     <style>
-        [data-testid="stAppViewContainer"], .main .block-container {{
-            background: {BG_PAGE};
-        }}
-        .main .block-container {{
-            color: {TEXT_PRI};
-        }}
         h1, h2, h3, h4, h5, h6, .main p, .main label, .main span {{
             color: {TEXT_PRI} !important;
         }}
@@ -58,7 +61,8 @@ def apply_theme():
             border-color: {BORDER} !important;
         }}
 
-        /* Banners — dark-tinted instead of light pastel */
+        /* Banners — dark-tinted instead of light pastel. Custom
+           classes with no Streamlit-native equivalent. */
         .alert-banner {{
             background    : #2a1414;
             border-left   : 4px solid {DANGER};
@@ -87,45 +91,15 @@ def apply_theme():
             font-size     : 14px;
         }}
 
-        /* Streamlit's own metric/info/success/warning/error boxes —
-           safety net for pages not yet migrated to metric_card() */
+        /* Light, testid-based touches only — these attributes are
+           stable Streamlit test hooks, not guessed internal markup,
+           so they're safe to rely on unlike the form-control
+           overrides removed above. */
         [data-testid="stMetric"] {{
             background    : {BG_CARD};
             border-radius : 8px;
             padding       : 14px 16px;
         }}
-        [data-testid="stMetricLabel"] {{ color: {TEXT_SEC} !important; }}
-        [data-testid="stMetricValue"] {{ color: {TEXT_PRI} !important; }}
-
-        [data-testid="stNotificationContentInfo"],
-        [data-testid="stNotificationContentSuccess"],
-        [data-testid="stNotificationContentWarning"],
-        [data-testid="stNotificationContentError"] {{
-            background    : {BG_CARD} !important;
-            color         : {TEXT_PRI} !important;
-            border-radius : 8px;
-        }}
-
-        /* Form controls in the main area (sidebar's own are already
-           styled separately in app.py) */
-        .main [data-baseweb="select"] > div,
-        .main input, .main textarea {{
-            background : {BG_CARD} !important;
-            color      : {TEXT_PRI} !important;
-            border     : 0.5px solid {BORDER} !important;
-        }}
-        .main [data-baseweb="tab-list"] {{
-            background : transparent;
-        }}
-        .main [data-baseweb="tab"] {{
-            color : {TEXT_SEC} !important;
-        }}
-        .main [aria-selected="true"] {{
-            color        : {ACCENT} !important;
-            border-color : {ACCENT} !important;
-        }}
-
-        /* Dataframes / tables */
         [data-testid="stDataFrame"], [data-testid="stTable"] {{
             background : {BG_CARD};
         }}
