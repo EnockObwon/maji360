@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 from core.database import get_session, DailyReading
 from core.auth import require_login
 from collections import defaultdict
+from core.theme import metric_card, style_dark_chart, ACCENT, DANGER, WARNING, SUCCESS, TEXT_SEC
 
 
 def show():
@@ -24,7 +25,7 @@ def show():
     )
     st.divider()
 
-    # ── Fetch all readings ─────────────────────────────
+    # Fetch all readings 
     session  = get_session()
     readings = session.query(DailyReading).filter(
         DailyReading.system_id == system_id
@@ -35,7 +36,7 @@ def show():
         st.info("No readings available yet.")
         return
 
-    # ── Aggregate by month ─────────────────────────────
+    # Aggregate by month
     monthly = defaultdict(lambda: {"pumped": 0.0,
                                     "consumed": 0.0,
                                     "pump_visits": 0,
@@ -60,7 +61,7 @@ def show():
     pump_visits = [monthly[m]["pump_visits"] for m in months]
     tank_visits = [monthly[m]["tank_visits"] for m in months]
 
-    # ── KPI summary ────────────────────────────────────
+    # KPI summary 
     total_pumped   = sum(pumped)
     total_consumed = sum(consumed)
     total_nrw      = round(total_pumped - total_consumed, 1)
@@ -70,17 +71,18 @@ def show():
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("Total pumped",   f"{total_pumped:.0f} m³")
+        st.markdown(metric_card("Total pumped", f"{total_pumped:.0f} m³", accent=ACCENT), unsafe_allow_html=True)
     with c2:
-        st.metric("Total consumed", f"{total_consumed:.0f} m³")
+        st.markdown(metric_card("Total consumed", f"{total_consumed:.0f} m³", accent=ACCENT), unsafe_allow_html=True)
     with c3:
-        st.metric("Total NRW",      f"{total_nrw:.0f} m³")
+        st.markdown(metric_card("Total NRW", f"{total_nrw:.0f} m³", accent=ACCENT), unsafe_allow_html=True)
     with c4:
-        st.metric("Overall NRW %",  f"{overall_nrw}%")
+        nrw_accent = DANGER if overall_nrw >= 20 else (WARNING if overall_nrw >= 15 else SUCCESS)
+        st.markdown(metric_card("Overall NRW %", f"{overall_nrw}%", accent=nrw_accent), unsafe_allow_html=True)
 
     st.divider()
 
-    # ── Chart 1: Monthly water produced ───────────────
+    # Chart 1: Monthly water produced 
     st.markdown("### Monthly water produced — pump house (m³)")
     st.caption(
         "Total volume pumped each month from all operator visits"
@@ -105,20 +107,17 @@ def show():
     fig1.update_layout(
         height        = 320,
         margin        = dict(t=30, b=10, l=0, r=0),
-        plot_bgcolor  = "white",
-        paper_bgcolor = "white",
         yaxis         = dict(
-            title     = "Volume (m³)",
-            gridcolor = "#f1f5f9"
+            title     = "Volume (m³)"
         ),
-        xaxis = dict(gridcolor="#f1f5f9"),
         showlegend = False
     )
+    style_dark_chart(fig1)
     st.plotly_chart(fig1, use_container_width=True)
 
     st.divider()
 
-    # ── Chart 2: Monthly tank flow to consumers ────────
+    # Chart 2: Monthly tank flow to consumers 
     st.markdown(
         "### Monthly tank flow to consumers — tank outlet (m³)"
     )
@@ -145,20 +144,17 @@ def show():
     fig2.update_layout(
         height        = 320,
         margin        = dict(t=30, b=10, l=0, r=0),
-        plot_bgcolor  = "white",
-        paper_bgcolor = "white",
         yaxis         = dict(
-            title     = "Volume (m³)",
-            gridcolor = "#f1f5f9"
+            title     = "Volume (m³)"
         ),
-        xaxis = dict(gridcolor="#f1f5f9"),
         showlegend = False
     )
+    style_dark_chart(fig2)
     st.plotly_chart(fig2, use_container_width=True)
 
     st.divider()
 
-    # ── Chart 3: Pump vs Tank grouped + NRW line ───────
+    # Chart 3: Pump vs Tank grouped + NRW line
     st.markdown("### Monthly pump vs tank — NRW gap")
     st.caption(
         "Blue = pumped, Green = to consumers, "
@@ -199,20 +195,18 @@ def show():
         y                   = 20,
         line_dash           = "dash",
         line_color          = "#ef4444",
-        opacity             = 0.4,
+        opacity             = 0.6,
         annotation_text     = "20% NRW threshold",
         annotation_position = "top right",
+        annotation_font_color = TEXT_SEC,
         yref                = "y2"
     )
     fig3.update_layout(
         barmode       = "group",
         height        = 380,
         margin        = dict(t=20, b=10, l=0, r=0),
-        plot_bgcolor  = "white",
-        paper_bgcolor = "white",
         yaxis         = dict(
-            title     = "Volume (m³)",
-            gridcolor = "#f1f5f9"
+            title     = "Volume (m³)"
         ),
         yaxis2 = dict(
             title      = "NRW %",
@@ -222,7 +216,6 @@ def show():
                          if nrw_pct else [0, 100],
             showgrid   = False
         ),
-        xaxis  = dict(gridcolor="#f1f5f9"),
         legend = dict(
             orientation = "h",
             yanchor     = "bottom",
@@ -231,11 +224,12 @@ def show():
             x           = 0
         )
     )
+    style_dark_chart(fig3)
     st.plotly_chart(fig3, use_container_width=True)
 
     st.divider()
 
-    # ── Monthly data table ─────────────────────────────
+    # Monthly data table 
     st.markdown("### Monthly summary table")
     rows = []
     for i, month in enumerate(months):
