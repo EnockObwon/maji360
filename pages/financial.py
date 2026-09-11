@@ -5,6 +5,7 @@ from core.database import get_session, get_engine
 from core.auth import require_login
 from collections import defaultdict
 from sqlalchemy import text
+from core.theme import metric_card, style_dark_chart, ACCENT, SUCCESS, DANGER
 
 
 def get_expenses(system_id: int) -> list:
@@ -43,7 +44,7 @@ def show():
     )
     st.divider()
 
-    # ── Fetch data ─────────────────────────────────────
+    # Fetch data 
     from core.database import Bill
     session   = get_session()
     all_bills = session.query(Bill).filter_by(
@@ -53,7 +54,7 @@ def show():
 
     expenses = get_expenses(system_id)
 
-    # ── Revenue aggregates ─────────────────────────────
+    # Revenue aggregates
     total_billed = sum(b.amount or 0 for b in all_bills)
     total_collected = sum(
         b.amount_paid or 0 for b in all_bills
@@ -67,7 +68,7 @@ def show():
             monthly_billed[b.bill_month]    += b.amount or 0
             monthly_collected[b.bill_month] += b.amount_paid or 0
 
-    # ── Expense aggregates ─────────────────────────────
+    # Expense aggregates 
     total_expenses   = sum(e["amount"] for e in expenses)
     net_surplus      = total_collected - total_expenses
 
@@ -79,40 +80,38 @@ def show():
         if e["category"]:
             expenses_by_cat[e["category"]] += e["amount"]
 
-    # ── KPI cards ──────────────────────────────────────
+    # KPI cards 
     st.markdown("### Financial summary")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric(
+        st.markdown(metric_card(
             "Revenue collected",
             f"{currency} {total_collected/1000000:.2f}M"
             if total_collected >= 1000000
-            else f"{currency} {total_collected:,.0f}"
-        )
+            else f"{currency} {total_collected:,.0f}",
+            accent=SUCCESS,
+        ), unsafe_allow_html=True)
     with c2:
-        st.metric(
-            "Total expenses",
-            f"{currency} {total_expenses:,.0f}"
-        )
+        st.markdown(metric_card(
+            "Total expenses", f"{currency} {total_expenses:,.0f}", accent=DANGER,
+        ), unsafe_allow_html=True)
     with c3:
-        st.metric(
+        st.markdown(metric_card(
             "Net surplus",
             f"{currency} {net_surplus/1000000:.2f}M"
             if net_surplus >= 1000000
-            else f"{currency} {net_surplus:,.0f}"
-        )
+            else f"{currency} {net_surplus:,.0f}",
+            accent=SUCCESS if net_surplus >= 0 else DANGER,
+        ), unsafe_allow_html=True)
     with c4:
         expense_ratio = round(
             (total_expenses / total_collected) * 100, 1
         ) if total_collected > 0 else 0
-        st.metric(
-            "Expense ratio",
-            f"{expense_ratio}%",
-        )
+        st.markdown(metric_card("Expense ratio", f"{expense_ratio}%", accent=ACCENT), unsafe_allow_html=True)
 
     st.divider()
 
-    # ── Chart 1: Income vs Expenses by month ───────────
+    # Chart 1: Income vs Expenses by month 
     st.markdown("### Monthly income vs expenses")
     st.caption(
         "Green = revenue collected · "
@@ -160,13 +159,9 @@ def show():
         barmode       = "group",
         height        = 380,
         margin        = dict(t=20, b=10, l=0, r=0),
-        plot_bgcolor  = "white",
-        paper_bgcolor = "white",
         yaxis         = dict(
-            title     = f"Amount ({currency})",
-            gridcolor = "#f1f5f9"
+            title     = f"Amount ({currency})"
         ),
-        xaxis  = dict(gridcolor="#f1f5f9"),
         legend = dict(
             orientation = "h",
             yanchor     = "bottom",
@@ -175,11 +170,12 @@ def show():
             x           = 0
         )
     )
+    style_dark_chart(fig1)
     st.plotly_chart(fig1, use_container_width=True)
 
     st.divider()
 
-    # ── Chart 2: Expenses by category pie chart ────────
+    # Chart 2: Expenses by category pie chart 
     st.markdown("### Expenses by category")
     col_left, col_right = st.columns(2)
 
@@ -196,13 +192,13 @@ def show():
         fig2.update_layout(
             height        = 300,
             margin        = dict(t=20, b=10, l=0, r=0),
-            paper_bgcolor = "white",
             showlegend    = True,
             legend        = dict(
                 orientation = "v",
                 x           = 0.7
             )
         )
+        style_dark_chart(fig2)
         st.plotly_chart(fig2, use_container_width=True)
 
     with col_right:
@@ -224,28 +220,15 @@ def show():
             hide_index=True
         )
 
-        st.markdown(f"""
-        <div style='background:#f0fdf4;border-radius:8px;
-                    padding:12px 16px;margin-top:8px'>
-            <div style='font-size:12px;color:#64748b;
-                        text-transform:uppercase;
-                        letter-spacing:0.06em'>
-                Net surplus
-            </div>
-            <div style='font-size:24px;font-weight:600;
-                        color:#166534;font-family:monospace'>
-                {currency} {net_surplus:,.0f}
-            </div>
-            <div style='font-size:12px;color:#64748b;
-                        margin-top:4px'>
-                Revenue collected minus total expenses
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(metric_card(
+            "Net surplus", f"{currency} {net_surplus:,.0f}",
+            accent=SUCCESS if net_surplus >= 0 else DANGER,
+        ), unsafe_allow_html=True)
+        st.caption("Revenue collected minus total expenses")
 
     st.divider()
 
-    # ── Full expense ledger ────────────────────────────
+    # Full expense ledger
     st.markdown("### Expense transactions")
     if expenses:
         exp_rows = [{
@@ -271,7 +254,7 @@ def show():
 
     st.divider()
 
-    # ── Income statement summary ───────────────────────
+    # Income statement summary
     st.markdown("### Income statement")
     st.markdown(f"""
     | Item | Amount ({currency}) |
