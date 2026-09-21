@@ -4,6 +4,7 @@ from core.auth import require_login
 from core.sync import sync_system
 from sqlalchemy import text as sql_text
 from datetime import datetime, timezone
+from core.theme import metric_card, BG_CARD, BORDER, TEXT_PRI, TEXT_SEC, TEXT_MUTED, ACCENT, SUCCESS
 
 
 def get_sync_status(system_id: int) -> dict:
@@ -87,7 +88,7 @@ def show():
         )
         return
 
-    # ── Stats ─────────────────────────────────────────────
+    # Stats 
     session       = get_session()
     reading_count = session.query(DailyReading).filter_by(system_id=system_id).count()
     bill_count    = session.query(Bill).filter_by(system_id=system_id).count()
@@ -98,11 +99,11 @@ def show():
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.metric("Readings in database", reading_count)
+        st.markdown(metric_card("Readings in database", str(reading_count), accent=ACCENT), unsafe_allow_html=True)
     with c2:
-        st.metric("Bills in database", bill_count)
+        st.markdown(metric_card("Bills in database", str(bill_count), accent=ACCENT), unsafe_allow_html=True)
     with c3:
-        st.metric("Last sync", last_sync)
+        st.markdown(metric_card("Last sync", last_sync, accent=ACCENT), unsafe_allow_html=True)
 
     st.divider()
 
@@ -113,8 +114,10 @@ def show():
             st.success(f"✓ Last sync completed — {prev.get('time', '')}")
             r = prev.get("results", {})
             st.markdown(
-                f"<div style='background:#f0fdf4;border-radius:8px;"
-                f"padding:12px 16px;font-size:14px;margin-bottom:8px'>"
+                f"<div style='background:{BG_CARD};border-radius:8px;"
+                f"border-left:3px solid {SUCCESS};"
+                f"padding:12px 16px;font-size:14px;margin-bottom:8px;"
+                f"color:{TEXT_PRI}'>"
                 f"<b>Sync summary</b><br>"
                 f"New pump readings : <b>{r.get('new_pump', 0)}</b><br>"
                 f"New tank readings : <b>{r.get('new_tank', 0)}</b><br>"
@@ -135,11 +138,13 @@ def show():
 
         st.divider()
 
-    # ── Automatic daily sync info ──────────────────────────
+    # Automatic daily sync info 
     st.markdown("### Automatic daily sync")
     st.markdown(
-        "<div style='background:#eff6ff;border-radius:8px;"
-        "padding:12px 16px;font-size:14px;margin-bottom:16px'>"
+        f"<div style='background:{BG_CARD};border-radius:8px;"
+        f"border-left:3px solid {ACCENT};"
+        f"padding:12px 16px;font-size:14px;margin-bottom:16px;"
+        f"color:{TEXT_PRI}'>"
         "⏰ Maji360 syncs automatically every day at <b>06:00 EAT</b> "
         "(03:00 UTC) via GitHub Actions. This pulls the latest pump "
         "readings, billing transactions, payments and expenses from mWater."
@@ -147,7 +152,7 @@ def show():
         unsafe_allow_html=True
     )
 
-    # ── Manual sync ────────────────────────────────────────
+    # Manual sync 
     st.markdown("### Manual sync")
     st.caption(
         "Run a manual sync if you need the latest data "
@@ -191,7 +196,7 @@ def show():
 
     st.divider()
 
-    # ── What gets synced ───────────────────────────────────
+    # What gets synced 
     st.markdown("### What gets synced")
     items = [
         ("📊", "Pump readings",
@@ -212,10 +217,10 @@ def show():
     for icon, title, desc in items:
         st.markdown(
             f"<div style='display:flex;align-items:flex-start;"
-            f"padding:8px 0;border-bottom:1px solid #f1f5f9'>"
+            f"padding:8px 0;border-bottom:1px solid {BORDER}'>"
             f"<span style='font-size:20px;margin-right:12px'>{icon}</span>"
-            f"<div><b>{title}</b><br>"
-            f"<span style='font-size:13px;color:#64748b'>{desc}</span>"
+            f"<div><b style='color:{TEXT_PRI}'>{title}</b><br>"
+            f"<span style='font-size:13px;color:{TEXT_MUTED}'>{desc}</span>"
             f"</div></div>",
             unsafe_allow_html=True
         )
