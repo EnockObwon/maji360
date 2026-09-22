@@ -338,6 +338,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         log_msg(f"Group ID : {sys_cfg['group_id']}")
         log_msg(f"WS UUID  : {sys_cfg['water_system_id']}")
         log_msg(f"WS Code  : {sys_cfg['water_system_code']}")
+        log_msg(f"Sync engine build: 2026-09-10-payment-savepoint-fix")
         log_msg(f"{'─'*44}")
 
         if not form_id:
@@ -347,7 +348,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             session.close()
             return {"error": err_msg, "system": system_name}
 
-        # Fetch mWater responses 
+        # Fetch mWater responses
         log_msg("Fetching mWater responses...")
         all_responses = []
         fetch_complete = False
@@ -448,7 +449,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             try:
                 data = r.get("data", {})
 
-                # Water-system filter
+                # Water-system filter 
                 # This form is shared across multiple water systems
                 # ("Select the Water system" is a question on the
                 # form, not implied by form_id). Without this check,
@@ -677,7 +678,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 f"expected, not an error)"
             )
 
-        # Orphan detection
+        # Orphan detection 
         # Mirrors the existing pattern in sync_billing/sync_payments.
         # Only runs when the fetch above completed naturally — if it
         # was cut short by an API error, all_responses is an
@@ -911,7 +912,10 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
                 log_msg(f"  Accounts lookup error: {e}")
 
         conn_type_updated = 0
+        conn_type_unmatched: list[str] = []
+        MAX_CONN_TYPE_SAMPLES = 8
         new_count = 0
+        unmatched_water_points: list[str] = []
 
         for wp in wps_for_system:
             code = str(wp.get("code", ""))
@@ -936,6 +940,17 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
                         )
                         existing_cust.connection_type = new_conn_type
                         conn_type_updated += 1
+                elif wp_type and wp_type not in CONN_TYPE_MAP:
+                    # mWater has an explicit type for this water point,
+                    # but it doesn't match either string CONN_TYPE_MAP
+                    # expects exactly — this is why a customer can stay
+                    # stuck on the wrong connection_type indefinitely
+                    # with no error: the comparison just silently fails
+                    # every run. Surfacing the raw value here is what
+                    # actually lets this get diagnosed and fixed,
+                    # instead of guessing at what string mWater sends.
+                    if len(conn_type_unmatched) < MAX_CONN_TYPE_SAMPLES:
+                        conn_type_unmatched.append(f"{code}: {wp_type!r}")
                 continue
 
             name = wp.get("name", f"Customer {code}")
@@ -951,6 +966,7 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
             matched_acc = meter_to_account.get(code) or acc_name_to_code.get(name_key)
 
             if not matched_acc and cfg.get("accounts_key") and cfg.get("accounts_base"):
+                unmatched_water_points.append(f"{code} ({name})")
                 continue
 
             account_no      = matched_acc or f"{system_name[:3].upper()}-{code}"
@@ -967,6 +983,27 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
 
         if conn_type_updated:
             log_msg(f"  ↻ Connection types refreshed: {conn_type_updated}")
+
+        if conn_type_unmatched:
+            log_msg(
+                f"  ⚠ {len(conn_type_unmatched)} water point(s) have a "
+                f"type_improved/type_ value in mWater that doesn't match "
+                f"CONN_TYPE_MAP exactly, so their connection_type was left "
+                f"unchanged. Raw values seen (code: value):"
+            )
+            for entry in conn_type_unmatched:
+                log_msg(f"      {entry}")
+
+        if unmatched_water_points:
+            log_msg(
+                f"  ⚠ {len(unmatched_water_points)} water point(s) skipped — "
+                f"no matching account found in the Accounts API, so no "
+                f"Customer record was created for them:"
+            )
+            for entry in unmatched_water_points[:10]:
+                log_msg(f"      {entry}")
+            if len(unmatched_water_points) > 10:
+                log_msg(f"      ...and {len(unmatched_water_points) - 10} more")
 
         session.commit()
 
@@ -1470,7 +1507,7 @@ def sync_expenses(system_id, session, cfg, log) -> int:
         return 0
 
 
-# recalculate_nrw
+# recalculate_nrw 
 
 def recalculate_nrw(system_id: int, session) -> None:
     readings = session.query(DailyReading).filter_by(system_id=system_id).all()
