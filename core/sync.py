@@ -348,7 +348,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             session.close()
             return {"error": err_msg, "system": system_name}
 
-        # Fetch mWater responses 
+        # Fetch mWater responses
         log_msg("Fetching mWater responses...")
         all_responses = []
         fetch_complete = False
@@ -925,7 +925,14 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
             if not code:
                 continue
 
-            wp_type = wp.get("type_improved") or wp.get("type_")
+            # mWater's actual field name is "type" (confirmed via raw
+            # entity dump on 2026-09-23) — "type_" and "type_improved"
+            # are NOT real keys on this entity and always returned
+            # None, which is why connection_type classification never
+            # updated for anyone despite mWater having correct,
+            # exactly-matching data ("Piped into yard/plot" etc.) the
+            # whole time. This was a field-name bug, not a data gap.
+            wp_type = wp.get("type_improved") or wp.get("type")
 
             if not wp_type:
                 wp_type_blank_count += 1
@@ -933,9 +940,10 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
                     # type_improved/type_ came back blank — dump the
                     # FULL raw water point record so we can see every
                     # field mWater actually sent for it. If connection
-                    # type info exists at all, it'll be visible here
-                    # under whatever key mWater actually uses, even if
-                    # that's not "type_improved" or "type_".
+                    # type info exists at all, it'll be visible here.
+                    # (The real field turned out to be "type" — see the
+                    # fix above; this dump stays as a safety net in
+                    # case a future water point genuinely has neither.)
                     log_msg(f"  DEBUG water point (blank type) {code}: {wp}")
                     wp_raw_samples_logged += 1
 
