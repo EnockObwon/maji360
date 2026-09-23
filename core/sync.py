@@ -348,7 +348,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             session.close()
             return {"error": err_msg, "system": system_name}
 
-        # Fetch mWater responses
+        # Fetch mWater responses 
         log_msg("Fetching mWater responses...")
         all_responses = []
         fetch_complete = False
@@ -916,6 +916,9 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
         MAX_CONN_TYPE_SAMPLES = 8
         new_count = 0
         unmatched_water_points: list[str] = []
+        wp_type_blank_count = 0
+        MAX_WP_RAW_SAMPLES = 3
+        wp_raw_samples_logged = 0
 
         for wp in wps_for_system:
             code = str(wp.get("code", ""))
@@ -923,6 +926,18 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
                 continue
 
             wp_type = wp.get("type_improved") or wp.get("type_")
+
+            if not wp_type:
+                wp_type_blank_count += 1
+                if wp_raw_samples_logged < MAX_WP_RAW_SAMPLES:
+                    # type_improved/type_ came back blank — dump the
+                    # FULL raw water point record so we can see every
+                    # field mWater actually sent for it. If connection
+                    # type info exists at all, it'll be visible here
+                    # under whatever key mWater actually uses, even if
+                    # that's not "type_improved" or "type_".
+                    log_msg(f"  DEBUG water point (blank type) {code}: {wp}")
+                    wp_raw_samples_logged += 1
 
             if code in existing_meters:
                 if wp_type and wp_type in CONN_TYPE_MAP:
@@ -983,6 +998,13 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
 
         if conn_type_updated:
             log_msg(f"  ↻ Connection types refreshed: {conn_type_updated}")
+
+        if wp_type_blank_count:
+            log_msg(
+                f"  ℹ {wp_type_blank_count} of {len(wps_for_system)} water point(s) "
+                f"had no type_improved/type_ value at all from mWater — see the "
+                f"DEBUG water point line(s) above for their full raw fields."
+            )
 
         if conn_type_unmatched:
             log_msg(
