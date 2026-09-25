@@ -236,7 +236,7 @@ def show():
 
     st.divider()
 
-    # Chart 1: Pump vs Tank grouped bar 
+    # Chart 1: Pump vs Tank grouped bar
     st.markdown("### Pump vs tank — NRW gap")
     st.caption(
         "Blue = pumped · Green = to consumers · "
