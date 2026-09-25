@@ -192,7 +192,7 @@ def show_login():
         st.markdown(
             "<div style='text-align:center; margin-top:2rem;"
             "font-size:12px; color:#94a3b8'>"
-            "Maji360 v1.7.1 · Sub-Saharan Africa</div>",
+            "Maji360 v1.8.0 · Sub-Saharan Africa</div>",
             unsafe_allow_html=True
         )
 
