@@ -91,9 +91,17 @@ def show():
     st.divider()
 
     # Fetch all readings 
+    # Excludes orphaned readings (source response deleted in mWater)
+    # — matches recalculate_nrw()'s own filter exactly. Without this,
+    # a reading whose source was deleted keeps being counted here
+    # forever, even after it's correctly excluded from the NRWRecord
+    # table the Home page banner reads from — which is exactly what
+    # left this page and Operations showing a corrupted total for
+    # Nyakabale-Kibibira after row 469's bad tank reading was orphaned.
     session  = get_session()
     readings = session.query(DailyReading).filter(
-        DailyReading.system_id == system_id
+        DailyReading.system_id == system_id,
+        DailyReading.is_orphaned.isnot(True),
     ).order_by(DailyReading.reading_date).all()
     session.close()
 
@@ -476,7 +484,7 @@ def show():
 
     st.divider()
 
-    # Annual water balance
+    # Annual water balance 
     st.markdown("### Annual water balance")
 
     years = sorted(set(m[:4] for m in months))
