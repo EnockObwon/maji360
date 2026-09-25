@@ -120,7 +120,7 @@ def show():
 
     st.divider()
 
-    # Chart 2: Monthly tank flow to consumers 
+    # Chart 2: Monthly tank flow to consumers
     st.markdown(
         "### Monthly tank flow to consumers — tank outlet (m³)"
     )
@@ -157,7 +157,7 @@ def show():
 
     st.divider()
 
-    # Chart 3: Pump vs Tank grouped + NRW line 
+    # Chart 3: Pump vs Tank grouped + NRW line
     st.markdown("### Monthly pump vs tank — NRW gap")
     st.caption(
         "Blue = pumped, Green = to consumers, "
