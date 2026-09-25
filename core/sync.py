@@ -453,14 +453,26 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         # IDs another system's sync already claimed, causing it to
         # re-attempt an insert Postgres will reject — which is exactly
         # what happened on 2026-08-25's run.
-        existing_ids = set(
-            row[0]
-            for row in session.execute(sql_text(
-                "SELECT mwater_response_id FROM daily_readings "
-                "WHERE mwater_response_id IS NOT NULL"
-            )).fetchall()
-            if row[0]
-        )
+        #
+        # Stores each response's CURRENT stored values, not just its
+        # existence — this is what makes edit-detection possible.
+        # Previously this was a bare set of IDs, and a response
+        # already in the table was always treated as a pure duplicate
+        # and skipped, with no check of whether its answers had
+        # changed since. Confirmed real-world case (Nyakabale-
+        # Kibibira, 2026-09): mWater's own "Number of Edits: 1" showed
+        # a tank reading corrected after our sync already captured its
+        # original (mistyped) value, and the correction was silently
+        # never picked up — sync_billing already re-checks and updates
+        # on value changes; readings never did until now.
+        existing_readings: dict[str, tuple] = {}
+        for row in session.execute(sql_text(
+            "SELECT mwater_response_id, id, pump_end_reading, "
+            "tank_end_reading, system_id FROM daily_readings "
+            "WHERE mwater_response_id IS NOT NULL"
+        )).fetchall():
+            if row[0]:
+                existing_readings[row[0]] = (row[1], row[2], row[3], row[4])
 
         last_pump_end, last_tank_end = get_last_end_readings(system_id, session)
         log_msg(f"Pump end before this run : {last_pump_end}")
@@ -475,7 +487,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
 
         water_system_code = sys_cfg["water_system_code"]
 
-        new_pump = new_tank = duplicates = 0
+        new_pump = new_tank = duplicates = edited_readings = 0
         incomplete_pump = incomplete_tank = other_monitoring = 0
         processing_errors = cross_system_conflicts = other_water_system = 0
         incomplete_samples: list[str] = []
@@ -483,9 +495,6 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
 
         for r in all_responses:
             resp_id = r.get("_id", r.get("id", ""))
-            if resp_id in existing_ids:
-                duplicates += 1
-                continue
 
             # Isolate each response: a single malformed/unexpected
             # response should never be able to abort the whole run and
@@ -517,6 +526,81 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 pe   = safe_float(data.get(pump_end_fid))
                 te   = safe_float(data.get(tank_end_fid))
 
+                submitted = r.get("submittedOn", "")
+                try:
+                    reading_date = datetime.fromisoformat(
+                        submitted.replace("Z", "+00:00")
+                    ) if submitted else datetime.now(timezone.utc)
+                except Exception:
+                    reading_date = datetime.now(timezone.utc)
+
+                # ── Already-synced response: duplicate or edit? ──
+                # A response already in the table used to be treated
+                # as a pure duplicate unconditionally. Now its stored
+                # values are compared against what mWater currently
+                # says, so a correction made in mWater after our
+                # original sync (visible there as "Number of Edits")
+                # actually gets picked up instead of being silently
+                # stuck on the original, possibly wrong, value forever.
+                if resp_id in existing_readings:
+                    ex_id, ex_pump, ex_tank, ex_sysid = existing_readings[resp_id]
+                    if ex_sysid != system_id:
+                        # Claimed by a different system's sync already
+                        # — unchanged behavior, never touched here.
+                        cross_system_conflicts += 1
+                        continue
+                    pump_changed = pe is not None and ex_pump != pe
+                    tank_changed = te is not None and ex_tank != te
+                    if not (pump_changed or tank_changed):
+                        duplicates += 1
+                        continue
+
+                    set_clauses = []
+                    params = {"id": ex_id}
+                    if pump_changed:
+                        prev_pump, _ = _get_adjacent_reading(
+                            session, system_id, "pump_end_reading", reading_date, before=True
+                        )
+                        diff = round(pe - prev_pump, 2) if prev_pump is not None else 0.0
+                        set_clauses += ["pump_end_reading = :pe", "water_produced_m3 = :wp"]
+                        params["pe"] = pe
+                        params["wp"] = diff if diff > 0 else 0.0
+                    if tank_changed:
+                        prev_tank, _ = _get_adjacent_reading(
+                            session, system_id, "tank_end_reading", reading_date, before=True
+                        )
+                        diff = round(te - prev_tank, 2) if prev_tank is not None else 0.0
+                        set_clauses += ["tank_end_reading = :te", "water_consumed_m3 = :wc"]
+                        params["te"] = te
+                        params["wc"] = diff if diff > 0 else 0.0
+
+                    try:
+                        session.execute(sql_text(
+                            f"UPDATE daily_readings SET {', '.join(set_clauses)} WHERE id = :id"
+                        ), params)
+                        log_msg(
+                            f"  ↻ Response {resp_id[:8]} was edited in mWater "
+                            f"since last sync — reading (id={ex_id}) updated"
+                        )
+                        edited_readings += 1
+                        # The edited value also changes what the NEXT
+                        # reading in each affected chain should have
+                        # been diffed against — same correction used
+                        # for a fresh insert or a newly-orphaned row.
+                        if pump_changed:
+                            _fix_next_reading(
+                                session, system_id, "pump_end_reading",
+                                "water_produced_m3", reading_date, pe, log_msg
+                            )
+                        if tank_changed:
+                            _fix_next_reading(
+                                session, system_id, "tank_end_reading",
+                                "water_consumed_m3", reading_date, te, log_msg
+                            )
+                    except Exception as e:
+                        log_msg(f"  ✗ Failed to apply edit for response {resp_id[:8]}: {e}")
+                    continue
+
                 # Monitoring-type classifier 
                 # "Type of monitoring" on this form branches to one of:
                 # Pump house / Tower-Reservoir / PSPs / Private connection /
@@ -545,14 +629,6 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                         sample = f"  DEBUG incomplete {resp_id[:8]}: {data}"
                         log_msg(sample)
                         incomplete_samples.append(sample)
-
-                submitted = r.get("submittedOn", "")
-                try:
-                    reading_date = datetime.fromisoformat(
-                        submitted.replace("Z", "+00:00")
-                    ) if submitted else datetime.now(timezone.utc)
-                except Exception:
-                    reading_date = datetime.now(timezone.utc)
 
                 # Look up each meter's TRUE immediately-preceding
                 # reading by date, not "whatever this run's in-memory
@@ -647,7 +723,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                         f"claimed it — this form is shared). Skipped."
                     )
                 else:
-                    existing_ids.add(resp_id)
+                    existing_readings[resp_id] = (inserted_row[0], pe, te, system_id)
                     if pumped   > 0: new_pump += 1
                     if consumed > 0: new_tank += 1
 
@@ -676,6 +752,12 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         log_msg(f"New pump readings : {new_pump}")
         log_msg(f"New tank readings : {new_tank}")
         log_msg(f"Duplicates skipped: {duplicates}")
+        if edited_readings:
+            log_msg(
+                f"↻ {edited_readings} reading(s) had been edited in mWater "
+                f"since their original sync and were updated to match, "
+                f"with any affected downstream reading recalculated too."
+            )
         # Re-queried after the loop rather than trusting an in-loop
         # running variable. Diffs are now computed per-response via
         # _get_adjacent_reading (true predecessor by date), so nothing
@@ -852,6 +934,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             "new_payments":      new_payments,
             "new_expenses":      new_expenses,
             "duplicates":        duplicates,
+            "edited_readings":   edited_readings,
             "incomplete_pump":       incomplete_pump,
             "incomplete_tank":       incomplete_tank,
             "other_monitoring":      other_monitoring,
