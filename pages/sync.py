@@ -107,7 +107,7 @@ def show():
 
     st.divider()
 
-    # ── Show previous sync results (persisted across rerun) ──
+    # Show previous sync results (persisted across rerun) 
     prev = st.session_state.get(f"sync_result_{system_id}")
     if prev:
         if prev.get("status") == "success":
