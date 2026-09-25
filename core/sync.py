@@ -383,7 +383,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         log_msg(f"Group ID : {sys_cfg['group_id']}")
         log_msg(f"WS UUID  : {sys_cfg['water_system_id']}")
         log_msg(f"WS Code  : {sys_cfg['water_system_code']}")
-        log_msg(f"Sync engine build: 2026-09-25-school-institution-guard")
+        log_msg(f"Sync engine build: 2026-09-25-reading-edit-detection")
         log_msg(f"{'─'*44}")
 
         if not form_id:
@@ -534,7 +534,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 except Exception:
                     reading_date = datetime.now(timezone.utc)
 
-                # ── Already-synced response: duplicate or edit? ──
+                # Already-synced response: duplicate or edit? 
                 # A response already in the table used to be treated
                 # as a pure duplicate unconditionally. Now its stored
                 # values are compared against what mWater currently
@@ -970,7 +970,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
     return results
 
 
-# sync_customers 
+# sync_customers
 
 def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) -> int:
 
@@ -1428,7 +1428,7 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
         return 0
 
 
-# sync_payments 
+# sync_payments
 
 def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
 
