@@ -1,6 +1,7 @@
 streamlit
 sqlalchemy
 psycopg2-binary
+psycopg[binary]
 bcrypt
 requests
 africastalking
@@ -10,4 +11,3 @@ openpyxl
 xlsxwriter
 folium
 streamlit-folium
-psycopg[binary]
