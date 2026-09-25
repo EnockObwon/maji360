@@ -1255,7 +1255,7 @@ def _sync_customers_from_accounts(system_id, session, cfg, log, water_system_id=
         return 0
 
 
-# reallocate_payments 
+# reallocate_payments
 
 def reallocate_payments(system_id: int, session, log: list = None, commit: bool = True) -> int:
 
@@ -1304,7 +1304,7 @@ def reallocate_payments(system_id: int, session, log: list = None, commit: bool 
     return updated
 
 
-# sync_billing 
+# sync_billing
 
 def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
 
@@ -1326,6 +1326,18 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
         payment_txns = [t for t in all_txns if t.get("meter_volume") is None and t.get("customer_account")]
 
         new_bills = 0
+        # Tracks every billing transaction per (customer, month), not
+        # just the ones that happen to visibly oscillate between runs.
+        # sync_billing only ever keeps whatever transaction it processes
+        # LAST for a given customer-month, with no concept of which one
+        # is actually correct — a customer-month with 2+ raw
+        # transactions is silently at risk of this regardless of
+        # whether it happens to flip-flop in any particular run. This
+        # is the full, uncapped list for manual reconciliation against
+        # mWater and paper records — deliberately not sample-capped
+        # like other diagnostics, since completeness is the point here.
+        txns_by_customer_month: dict[tuple, list] = defaultdict(list)
+
         for t in billing_txns:
             cust_acc_id = t.get("customer_account", "")
             kr_code     = acc_to_kr.get(cust_acc_id, "")
@@ -1349,6 +1361,11 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
             bill_month = date_str[:7] if date_str else ""
             units_m3   = float(t.get("meter_volume", 0))
             amount     = float(t.get("amount", 0))
+
+            txns_by_customer_month[(customer.account_no, bill_month)].append({
+                "amount": amount, "units_m3": units_m3,
+                "mwater_id": mwater_id, "date": date_str,
+            })
 
             existing = session.query(Bill).filter_by(
                 system_id=system_id, customer_id=customer.id, bill_month=bill_month
@@ -1381,6 +1398,27 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
 
         session.commit()
         log_msg(f"  New bills added: {new_bills}")
+
+        multi_txn_months = {
+            k: v for k, v in txns_by_customer_month.items() if len(v) > 1
+        }
+        if multi_txn_months:
+            log_msg(
+                f"  ⚠ {len(multi_txn_months)} customer-month(s) have MULTIPLE "
+                f"billing transactions in the Accounts API. sync_billing keeps "
+                f"only whichever one it processes last, with no way to know "
+                f"which is correct — this is the complete list, for manual "
+                f"reconciliation against mWater and paper records (not "
+                f"sample-capped, since this is meant to be an audit target list):"
+            )
+            for (acct, month), entries in sorted(multi_txn_months.items()):
+                log_msg(f"      {acct} · {month} — {len(entries)} transactions:")
+                for e in entries:
+                    txn_ref = e["mwater_id"][:8] if e["mwater_id"] else "?"
+                    log_msg(
+                        f"          {txn_ref}: amount={e['amount']:,.0f} "
+                        f"units={e['units_m3']} date={e['date']}"
+                    )
 
         if all_txns:
             current_billing_ids = {
@@ -1622,7 +1660,7 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
         return 0
 
 
-# sync_expenses
+# sync_expenses 
 
 def sync_expenses(system_id, session, cfg, log) -> int:
 
