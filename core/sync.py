@@ -534,7 +534,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 except Exception:
                     reading_date = datetime.now(timezone.utc)
 
-                # Already-synced response: duplicate or edit? 
+                # ── Already-synced response: duplicate or edit? ──
                 # A response already in the table used to be treated
                 # as a pure duplicate unconditionally. Now its stored
                 # values are compared against what mWater currently
@@ -970,7 +970,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
     return results
 
 
-# sync_customers
+# sync_customers 
 
 def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) -> int:
 
@@ -1428,7 +1428,7 @@ def sync_billing(system_id, session, cfg, sys_cfg, log) -> int:
         return 0
 
 
-# sync_payments
+# sync_payments 
 
 def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
 
@@ -1622,7 +1622,7 @@ def sync_payments(system_id, session, cfg, sys_cfg, log) -> int:
         return 0
 
 
-# sync_expenses 
+# sync_expenses
 
 def sync_expenses(system_id, session, cfg, log) -> int:
 
