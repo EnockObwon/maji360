@@ -54,7 +54,7 @@ def show():
 
     expenses = get_expenses(system_id)
 
-    # Revenue aggregates
+    # Revenue aggregates 
     total_billed = sum(b.amount or 0 for b in all_bills)
     total_collected = sum(
         b.amount_paid or 0 for b in all_bills
@@ -228,7 +228,7 @@ def show():
 
     st.divider()
 
-    # Full expense ledger
+    # Full expense ledger 
     st.markdown("### Expense transactions")
     if expenses:
         exp_rows = [{
@@ -254,7 +254,7 @@ def show():
 
     st.divider()
 
-    # Income statement summary
+    # Income statement summary 
     st.markdown("### Income statement")
     st.markdown(f"""
     | Item | Amount ({currency}) |
