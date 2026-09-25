@@ -338,7 +338,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
         log_msg(f"Group ID : {sys_cfg['group_id']}")
         log_msg(f"WS UUID  : {sys_cfg['water_system_id']}")
         log_msg(f"WS Code  : {sys_cfg['water_system_code']}")
-        log_msg(f"Sync engine build: 2026-09-10-payment-savepoint-fix")
+        log_msg(f"Sync engine build: 2026-09-25-school-institution-guard")
         log_msg(f"{'─'*44}")
 
         if not form_id:
@@ -348,7 +348,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             session.close()
             return {"error": err_msg, "system": system_name}
 
-        # Fetch mWater responses
+        # Fetch mWater responses 
         log_msg("Fetching mWater responses...")
         all_responses = []
         fetch_complete = False
@@ -678,7 +678,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 f"expected, not an error)"
             )
 
-        # Orphan detection 
+        # Orphan detection
         # Mirrors the existing pattern in sync_billing/sync_payments.
         # Only runs when the fetch above completed naturally — if it
         # was cut short by an API error, all_responses is an
@@ -953,7 +953,24 @@ def sync_customers(system_id, system_name, form_id, session, cfg, sys_cfg, log) 
                     existing_cust = session.query(Customer).filter_by(
                         system_id=system_id, meter_no=code
                     ).first()
-                    if existing_cust and \
+                    # mWater's "type" field only ever resolves to PSP
+                    # or Private (CONN_TYPE_MAP) — it describes the
+                    # PHYSICAL connection (public tap/basin vs. yard/
+                    # plot), not who the customer is. It has no way to
+                    # express School or Institution, so it must never
+                    # overwrite one: a school's tap is very likely
+                    # physically "piped into public tap or basin" too,
+                    # but downgrading it to generic "PSP" destroys a
+                    # more specific classification that was almost
+                    # certainly set deliberately (either by name-match
+                    # at creation or corrected by hand since). This is
+                    # exactly what the module's own changelog comment
+                    # says should never happen — this guard is what
+                    # actually makes that true, which the code never
+                    # did before now.
+                    if existing_cust and existing_cust.connection_type in ("School", "Institution"):
+                        pass
+                    elif existing_cust and \
                        existing_cust.connection_type != new_conn_type:
                         log_msg(
                             f"  ↻ {existing_cust.account_no} "
