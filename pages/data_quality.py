@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import text as sql_text
 from core.database import get_session, Bill, Customer, Payment
-from core.sync import reallocate_payments
+from core.sync import reallocate_payments, _fix_next_reading
 from core.auth import require_login
 
 
@@ -54,6 +54,22 @@ def show():
     except Exception:
         orphaned_payment_rows = []
 
+    # Readings had orphan-detection in sync.py from early on, but this
+    # page never actually queried for them — bills and payments got a
+    # review workflow, readings never did. This is what surfaces the
+    # gap: a reading correctly flagged as orphaned by every sync run
+    # had genuinely nowhere in the UI to ever be seen or resolved.
+    try:
+        orphaned_reading_rows = session.execute(sql_text(
+            "SELECT id, reading_date, pump_end_reading, tank_end_reading, "
+            "water_produced_m3, water_consumed_m3, mwater_response_id "
+            "FROM daily_readings "
+            "WHERE system_id = :sid AND is_orphaned = true "
+            "ORDER BY reading_date"
+        ), {"sid": system_id}).fetchall()
+    except Exception:
+        orphaned_reading_rows = []
+
     cust_map = {
         c.id: c for c in session.query(Customer).filter_by(
             system_id=system_id
@@ -61,12 +77,12 @@ def show():
     }
 
     # Summary 
-    total_flagged = len(orphaned_bills) + len(orphaned_payment_rows)
+    total_flagged = len(orphaned_bills) + len(orphaned_payment_rows) + len(orphaned_reading_rows)
     if total_flagged == 0:
         session.close()
         st.success(
-            "✓ Nothing flagged. All synced bills and payments "
-            "still have a matching transaction in mWater."
+            "✓ Nothing flagged. All synced bills, payments, and "
+            "readings still have a matching transaction in mWater."
         )
         return
 
@@ -194,6 +210,86 @@ def show():
                         f"Kept payment of {currency} {amount:,.0f} — "
                         f"no longer tracked against mWater."
                     )
+                    st.rerun()
+            st.divider()
+
+    # Orphaned readings 
+    if orphaned_reading_rows:
+        st.markdown(f"### 📊 Readings ({len(orphaned_reading_rows)})")
+
+        for row in orphaned_reading_rows:
+            (r_id, r_date, pump_end, tank_end, produced, consumed, resp_id) = row
+            date_str = r_date.strftime("%d %b %Y %H:%M") \
+                if hasattr(r_date, "strftime") else str(r_date)[:16]
+
+            meter_desc = []
+            if pump_end is not None:
+                meter_desc.append(f"Pump end: {pump_end:.0f} (produced {produced or 0:.1f} m³)")
+            if tank_end is not None:
+                meter_desc.append(f"Tank end: {tank_end:.0f} (consumed {consumed or 0:.1f} m³)")
+
+            col1, col2, col3 = st.columns([4, 2, 2])
+            with col1:
+                st.markdown(
+                    f"**Reading on {date_str}**  \n"
+                    f"<span style='color:#64748b;font-size:13px'>"
+                    f"{' · '.join(meter_desc) if meter_desc else 'No meter values'}"
+                    f"</span>",
+                    unsafe_allow_html=True
+                )
+            with col2:
+                if st.button(
+                    "🗑 Confirm deleted",
+                    key=f"del_reading_{r_id}",
+                    help="Permanently remove this reading — confirms "
+                         "it was a mistaken entry that was deleted in "
+                         "mWater. The reading(s) after it in the same "
+                         "chain were already recalculated at the "
+                         "moment this was first flagged, so no "
+                         "further correction is needed here."
+                ):
+                    session.execute(sql_text(
+                        "DELETE FROM daily_readings WHERE id = :id"
+                    ), {"id": r_id})
+                    session.commit()
+                    st.success(f"Deleted reading from {date_str}.")
+                    st.rerun()
+            with col3:
+                if st.button(
+                    "✓ Keep — not deleted",
+                    key=f"keep_reading_{r_id}",
+                    help="This reading is correct. Stop tracking it "
+                         "against mWater and bring it back into NRW "
+                         "totals — the next reading in its chain is "
+                         "recalculated to account for it again."
+                ):
+                    session.execute(sql_text(
+                        "UPDATE daily_readings SET mwater_response_id = NULL, "
+                        "is_orphaned = false WHERE id = :id"
+                    ), {"id": r_id})
+                    session.commit()
+                    # Restores this reading as a valid predecessor
+                    # again — same recalculation sync.py already uses
+                    # for a fresh insert, reused here rather than
+                    # duplicated.
+                    fix_log: list[str] = []
+                    if pump_end is not None:
+                        _fix_next_reading(
+                            session, system_id, "pump_end_reading",
+                            "water_produced_m3", r_date, pump_end, fix_log.append
+                        )
+                    if tank_end is not None:
+                        _fix_next_reading(
+                            session, system_id, "tank_end_reading",
+                            "water_consumed_m3", r_date, tank_end, fix_log.append
+                        )
+                    session.commit()
+                    st.success(
+                        f"Kept reading from {date_str} — no longer "
+                        f"tracked against mWater."
+                    )
+                    for line in fix_log:
+                        st.caption(line.strip())
                     st.rerun()
             st.divider()
 
