@@ -200,9 +200,12 @@ def show():
             outstanding_data.append({"name": c.name, "owed": owed})
     outstanding_data.sort(key=lambda x: x["owed"], reverse=True)
 
-    # Recent readings 
+    # Recent readings — excludes orphaned readings, matching
+    # recalculate_nrw()'s own filter (see nrw_report.py for the full
+    # explanation of why this matters).
     recent_readings = session.query(DailyReading).filter(
-        DailyReading.system_id == system_id
+        DailyReading.system_id == system_id,
+        DailyReading.is_orphaned.isnot(True),
     ).order_by(DailyReading.reading_date.desc()).limit(14).all()
 
     session.close()
