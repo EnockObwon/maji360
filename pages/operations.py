@@ -26,9 +26,12 @@ def show():
     st.divider()
 
     # Fetch all readings 
+    # Excludes orphaned readings, matching recalculate_nrw()'s own
+    # filter — see nrw_report.py for the full explanation.
     session  = get_session()
     readings = session.query(DailyReading).filter(
-        DailyReading.system_id == system_id
+        DailyReading.system_id == system_id,
+        DailyReading.is_orphaned.isnot(True),
     ).order_by(DailyReading.reading_date).all()
     session.close()
 
@@ -36,7 +39,7 @@ def show():
         st.info("No readings available yet.")
         return
 
-    # Aggregate by month
+    # Aggregate by month 
     monthly = defaultdict(lambda: {"pumped": 0.0,
                                     "consumed": 0.0,
                                     "pump_visits": 0,
@@ -154,7 +157,7 @@ def show():
 
     st.divider()
 
-    # Chart 3: Pump vs Tank grouped + NRW line
+    # Chart 3: Pump vs Tank grouped + NRW line 
     st.markdown("### Monthly pump vs tank — NRW gap")
     st.caption(
         "Blue = pumped, Green = to consumers, "
