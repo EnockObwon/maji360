@@ -10,3 +10,4 @@ openpyxl
 xlsxwriter
 folium
 streamlit-folium
+psycopg[binary]
