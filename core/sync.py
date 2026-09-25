@@ -278,6 +278,51 @@ def _fix_next_reading(session, system_id: int, column: str, produced_column: str
         log_msg(f"  ✗ Failed to correct downstream reading id={next_id}: {e}")
 
 
+def _fix_after_orphan(session, system_id: int, column: str, produced_column: str,
+                       orphaned_reading_date, log_msg) -> None:
+    """Companion to _fix_next_reading, for the opposite direction: when
+    an EXISTING reading newly becomes orphaned (its source response was
+    deleted in mWater), whatever reading comes after it in the same
+    chain was diffed against that now-invalid value and is left with a
+    stale, wrong produced/consumed figure.
+
+    _fix_next_reading only ever runs on insert — it was never triggered
+    by a reading disappearing, so this case had no correction path at
+    all until now. This is exactly what happened to Nyakabale's row 476
+    (12,983 m³ consumed) after row 469 (a bad 21,421 tank reading) was
+    deleted in mWater and correctly orphaned: row 476's diff was still
+    sitting there computed against 469's bad value, because nothing
+    ever went back to recompute it.
+
+    Must be called AFTER the orphaned row's is_orphaned flag has
+    already been committed/executed in this session — otherwise
+    _get_adjacent_reading would still see the now-orphaned row as a
+    valid predecessor and this fix would do nothing.
+    """
+    next_val, next_id = _get_adjacent_reading(session, system_id, column, orphaned_reading_date, before=False)
+    if next_val is None:
+        return
+    true_prev_val, _ = _get_adjacent_reading(session, system_id, column, orphaned_reading_date, before=True)
+    if true_prev_val is None:
+        # No earlier reading at all — this is now the first baseline
+        # for the chain, so there's nothing to diff against.
+        correct = 0.0
+    else:
+        diff = round(next_val - true_prev_val, 2)
+        correct = diff if diff > 0 else 0.0
+    try:
+        session.execute(sql_text(
+            f"UPDATE daily_readings SET {produced_column} = :val WHERE id = :id"
+        ), {"val": correct, "id": next_id})
+        log_msg(
+            f"  ↻ Corrected downstream reading (id={next_id}) after "
+            f"predecessor was orphaned: {produced_column} recalculated "
+            f"to {correct}"
+        )
+    except Exception as e:
+        log_msg(f"  ✗ Failed to correct downstream reading id={next_id}: {e}")
+
+
 def _write_sync_log(session, system_id, triggered_by, status,
                     results, duration_seconds, log_lines, error_message=None):
     try:
@@ -678,7 +723,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 f"expected, not an error)"
             )
 
-        # Orphan detection
+        # Orphan detection 
         # Mirrors the existing pattern in sync_billing/sync_payments.
         # Only runs when the fetch above completed naturally — if it
         # was cut short by an API error, all_responses is an
@@ -697,7 +742,8 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
             }
             try:
                 tracked_readings = session.execute(sql_text(
-                    "SELECT id, mwater_response_id, reading_date, is_orphaned "
+                    "SELECT id, mwater_response_id, reading_date, is_orphaned, "
+                    "pump_end_reading, tank_end_reading "
                     "FROM daily_readings WHERE system_id = :sid "
                     "AND mwater_response_id IS NOT NULL"
                 ), {"sid": system_id}).fetchall()
@@ -705,7 +751,7 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                 tracked_readings = []
 
             for row in tracked_readings:
-                reading_id, resp_id_tracked, r_date, was_orphaned = row
+                reading_id, resp_id_tracked, r_date, was_orphaned, r_pump_end, r_tank_end = row
                 now_missing = resp_id_tracked not in current_response_ids
 
                 if now_missing and not was_orphaned:
@@ -725,6 +771,23 @@ def sync_system(system_id: int, log: list = None, triggered_by: str = "manual") 
                         newly_restored += 1
                         if len(restore_samples) < MAX_ORPHAN_SAMPLES:
                             restore_samples.append(f"  ✓ Reading {reading_id} no longer orphaned")
+                    elif now_missing and not was_orphaned:
+                        # This reading just became orphaned — whatever
+                        # reading comes after it in each chain it
+                        # participated in was diffed against this now-
+                        # invalid value and needs recomputing. Must run
+                        # after the UPDATE above so _get_adjacent_reading
+                        # correctly skips this row as a predecessor.
+                        if r_pump_end is not None:
+                            _fix_after_orphan(
+                                session, system_id, "pump_end_reading",
+                                "water_produced_m3", r_date, log_msg
+                            )
+                        if r_tank_end is not None:
+                            _fix_after_orphan(
+                                session, system_id, "tank_end_reading",
+                                "water_consumed_m3", r_date, log_msg
+                            )
 
             for line in orphan_samples:
                 log_msg(line)
