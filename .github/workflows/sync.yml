@@ -27,7 +27,14 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests sqlalchemy psycopg2-binary bcrypt streamlit
+        # psycopg[binary] added: SQLAlchemy is selecting the psycopg 3 dialect
+        # on this runner, so psycopg2-binary alone is not enough
+        # (ModuleNotFoundError: No module named 'psycopg'). Both drivers are
+        # installed so either URL style (postgresql:// or postgresql+psycopg://)
+        # keeps working. This mirrors the same fix already applied to the main
+        # app's requirements.txt — this workflow has its own separate
+        # dependency install step, so it needed the fix applied here too.
+        run: pip install requests sqlalchemy psycopg2-binary "psycopg[binary]" bcrypt streamlit
 
       - name: Run Maji360 sync
         env:
@@ -37,4 +44,3 @@ jobs:
           ACCOUNTS_CLIENT_KEY: ${{ secrets.ACCOUNTS_CLIENT_KEY }}
           ACCOUNTS_BASE: ${{ secrets.ACCOUNTS_BASE }}
         run: python scheduler/run_sync.py
-  
