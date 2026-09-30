@@ -6,6 +6,7 @@ from core.auth import require_login
 from collections import defaultdict
 from sqlalchemy import text as sql_text
 from core.theme import metric_card, style_dark_chart, ACCENT, SUCCESS, WARNING, DANGER, TEXT_SEC
+from core.database import NRWRecord
 
 
 def get_monthly_storage_changes(system_id: int) -> dict:
@@ -66,6 +67,166 @@ def get_maintenance_events(system_id: int) -> dict:
 
     return dict(events_by_month)
 
+
+
+def render_commercial_nrw_section(system_id: int):
+    """Tank-to-tap commercial NRW: Delivered (tank, field readings)
+    vs Billed (customer meters, from mWater billing). Complements the
+    physical pump-to-tank NRW above — that one never touches customer
+    billing at all, so under-registering meters, illegal connections,
+    unbilled consumption and billing data gaps were previously
+    invisible on this page. Reads straight from NRWRecord, populated
+    by the updated recalculate_nrw() in core/sync.py.
+    """
+    session = get_session()
+    records = (
+        session.query(NRWRecord)
+        .filter_by(system_id=system_id)
+        .order_by(NRWRecord.month)
+        .all()
+    )
+    session.close()
+
+    # commercial_nrw_pct is NULL until at least one bill has synced for
+    # that month — distinguishes "no billing data yet" from a genuine
+    # 0% commercial loss.
+    records = [r for r in records if r.commercial_nrw_pct is not None]
+
+    st.divider()
+    st.markdown("### Commercial NRW — tank to tap")
+    st.caption(
+        "Delivered (tank, field readings) vs Billed (customer meters, "
+        "from mWater billing). The gap is apparent/commercial loss: "
+        "under-registering meters, illegal connections, unbilled "
+        "consumption, or billing data gaps — separate from the "
+        "physical pump→tank NRW above."
+    )
+
+    if not records:
+        st.info(
+            "ℹ️ No commercial NRW data yet. This needs at least one "
+            "synced bill with a meter volume for this system — run a "
+            "sync, then check back here."
+        )
+        return
+
+    months       = [r.month for r in records]
+    delivered    = [round(r.water_billed or 0.0, 1) for r in records]
+    billed       = [round(r.water_billed_m3 or 0.0, 1) for r in records]
+    comm_nrw_m3  = [round(r.commercial_nrw_m3 or 0.0, 1) for r in records]
+    comm_nrw_pct = [round(r.commercial_nrw_pct or 0.0, 1) for r in records]
+
+    total_delivered = sum(delivered)
+    total_billed    = sum(billed)
+    total_loss      = round(total_delivered - total_billed, 1)
+    overall_pct     = round((total_loss / total_delivered) * 100, 1) if total_delivered > 0 else 0.0
+    latest_pct      = comm_nrw_pct[-1] if comm_nrw_pct else 0.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(metric_card("Delivered (tank)", f"{total_delivered:.0f} m³", accent=ACCENT), unsafe_allow_html=True)
+    with c2:
+        st.markdown(metric_card("Billed (customers)", f"{total_billed:.0f} m³", accent=ACCENT), unsafe_allow_html=True)
+    with c3:
+        st.markdown(metric_card("Commercial loss", f"{total_loss:.0f} m³", accent=WARNING), unsafe_allow_html=True)
+    with c4:
+        comm_accent = DANGER if overall_pct >= 20 else (WARNING if overall_pct >= 10 else SUCCESS)
+        # Same convention as the physical-NRW KPI row above: this
+        # compares latest-month vs overall for the SAME metric, not a
+        # period-over-period trend, so it's neutral text, not a colored
+        # up/down delta.
+        st.markdown(metric_card(
+            "Commercial NRW", f"{overall_pct}%",
+            delta=f"latest {latest_pct}%", delta_neutral=True, accent=comm_accent,
+        ), unsafe_allow_html=True)
+
+    st.divider()
+
+    fig3 = go.Figure()
+    fig3.add_trace(go.Bar(
+        name         = "Delivered — tank (m³)",
+        x            = months,
+        y            = delivered,
+        marker_color = "#bfdbfe",
+        opacity      = 0.8,
+    ))
+    fig3.add_trace(go.Bar(
+        name         = "Billed — customers (m³)",
+        x            = months,
+        y            = billed,
+        marker_color = "#22c55e",
+        opacity      = 0.8,
+    ))
+    fig3.add_trace(go.Scatter(
+        name   = "Commercial NRW %",
+        x      = months,
+        y      = comm_nrw_pct,
+        mode   = "lines+markers",
+        yaxis  = "y2",
+        line   = dict(color="#ef4444", width=2.5),
+        marker = dict(
+            size  = 8,
+            color = [
+                "#ef4444" if p >= 20 else
+                "#f59e0b" if p >= 10 else
+                "#22c55e"
+                for p in comm_nrw_pct
+            ],
+            line  = dict(color="white", width=1.5),
+        ),
+    ))
+    max_pct = max(comm_nrw_pct) if comm_nrw_pct else 100
+    fig3.add_hline(
+        y                     = 20,
+        line_dash             = "dash",
+        line_color            = "#ef4444",
+        opacity               = 0.6,
+        annotation_text       = "20% threshold",
+        annotation_position   = "top right",
+        annotation_font_color = TEXT_SEC,
+        yref                  = "y2",
+    )
+    fig3.update_layout(
+        barmode = "group",
+        height  = 400,
+        margin  = dict(t=20, b=10, l=0, r=0),
+        yaxis   = dict(title="Volume (m³)"),
+        yaxis2  = dict(
+            title      = "Commercial NRW %",
+            overlaying = "y",
+            side       = "right",
+            range      = [0, max_pct * 1.3 + 10],
+            showgrid   = False,
+        ),
+        xaxis   = dict(type="category"),
+        legend  = dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    style_dark_chart(fig3)
+    st.plotly_chart(fig3, use_container_width=True)
+
+    st.markdown("### Commercial NRW — monthly breakdown")
+
+    rows = []
+    for i, month in enumerate(months):
+        status = (
+            "🔴 ALERT" if comm_nrw_pct[i] >= 20 else
+            "🟡 WARN"  if comm_nrw_pct[i] >= 10 else
+            "🟢 OK"
+        )
+        rows.append({
+            "Month":              month,
+            "Delivered m³":       delivered[i],
+            "Billed m³":          billed[i],
+            "Commercial loss m³": comm_nrw_m3[i],
+            "Commercial NRW %":   f"{comm_nrw_pct[i]}%",
+            "Status":             status,
+        })
+
+    st.dataframe(
+        pd.DataFrame(rows),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 def show():
     require_login()
@@ -530,3 +691,5 @@ def show():
         "Adj NRW requires 2+ tank level readings "
         "per month in Field Ops."
     )
+
+    render_commercial_nrw_section(system_id)
