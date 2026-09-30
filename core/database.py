@@ -264,6 +264,30 @@ class NRWRecord(Base):
     water_billed   = Column(Float)
     nrw_m3         = Column(Float)
     nrw_percent    = Column(Float)
+
+    # Commercial NRW 
+    # water_billed_m3    : SUM(Bill.units_m3) for this system/month —
+    #                      what customers were ACTUALLY billed for,
+    #                      from the mWater Accounts API. Distinct from
+    #                      `water_billed` above, which despite its name
+    #                      is tank/field-reading data, not customer
+    #                      billing data (kept as-is for backward compat
+    #                      — nothing currently reads it, but not worth
+    #                      the risk of renaming a live column).
+    # commercial_nrw_m3  : water_billed (tank/delivered) minus
+    #                      water_billed_m3 (customer-billed) — the gap
+    #                      between what left the tank and what
+    #                      customers were billed for: apparent/
+    #                      commercial losses (meter under-registration,
+    #                      illegal connections, unbilled consumption,
+    #                      billing data gaps). NULL until at least one
+    #                      bill exists for that system/month.
+    # commercial_nrw_pct : commercial_nrw_m3 as % of water_billed
+    #                      (delivered). NULL under the same condition.
+    water_billed_m3    = Column(Float)
+    commercial_nrw_m3  = Column(Float)
+    commercial_nrw_pct = Column(Float)
+
     alert_sent     = Column(Boolean, default=False)
     created_at     = Column(DateTime, default=datetime.utcnow)
 
