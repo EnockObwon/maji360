@@ -1753,38 +1753,73 @@ def recalculate_nrw(system_id: int, session) -> None:
         if r.water_consumed_m3 and r.water_consumed_m3 > 0:
             monthly[month]["consumed"] += r.water_consumed_m3
 
-    for month, data in monthly.items():
+    # Real customer-billed volume: SUM(Bill.units_m3) per month, from
+    # the mWater Accounts API "meter_volume" figure recorded on each
+    # billing transaction. Excludes orphaned bills (source transaction
+    # no longer found in mWater) so a deleted mWater entry can't
+    # silently inflate commercial NRW.
+    billed: dict[str, float] = defaultdict(float)
+    bills = session.query(Bill).filter_by(system_id=system_id, is_orphaned=False).all()
+    for b in bills:
+        if b.units_m3 and b.units_m3 > 0:
+            billed[b.bill_month] += b.units_m3
+
+    all_months = set(monthly.keys()) | set(billed.keys())
+
+    for month in all_months:
+        data     = monthly.get(month, {"pumped": 0.0, "consumed": 0.0})
         pumped   = round(data["pumped"],   2)
         consumed = round(data["consumed"], 2)
         nrw_m3   = round(pumped - consumed, 2)
         nrw_pct  = round((nrw_m3 / pumped) * 100, 1) if pumped > 0 else 0.0
 
+        bill_vol  = billed.get(month)
+        billed_m3 = round(bill_vol, 2) if bill_vol is not None else None
+
+        # Commercial NRW: gap between what the field readings say left
+        # the tank (consumed) and what customers were actually billed
+        # for (billed_m3). NULL until this system/month has at least
+        # one bill, so "no billing data yet" is never confused with
+        # "zero commercial loss" on the dashboard.
+        if billed_m3 is not None and consumed > 0:
+            commercial_nrw_m3  = round(consumed - billed_m3, 2)
+            commercial_nrw_pct = round((commercial_nrw_m3 / consumed) * 100, 1)
+        else:
+            commercial_nrw_m3  = None
+            commercial_nrw_pct = None
+
         existing = session.query(NRWRecord).filter_by(system_id=system_id, month=month).first()
         if existing:
-            existing.water_produced = pumped
-            existing.water_billed   = consumed
-            existing.nrw_m3         = nrw_m3
-            existing.nrw_percent    = nrw_pct
+            existing.water_produced     = pumped
+            existing.water_billed       = consumed  # legacy field, kept as-is — tank/delivered volume
+            existing.nrw_m3             = nrw_m3
+            existing.nrw_percent        = nrw_pct
+            existing.water_billed_m3    = billed_m3
+            existing.commercial_nrw_m3  = commercial_nrw_m3
+            existing.commercial_nrw_pct = commercial_nrw_pct
         else:
             session.add(NRWRecord(
                 system_id=system_id, month=month,
                 water_produced=pumped, water_billed=consumed,
                 nrw_m3=nrw_m3, nrw_percent=nrw_pct,
+                water_billed_m3=billed_m3,
+                commercial_nrw_m3=commercial_nrw_m3,
+                commercial_nrw_pct=commercial_nrw_pct,
             ))
 
     # Delete any NRWRecord for a month that no longer has ANY
-    # qualifying readings backing it. Without this, a month's NRW
-    # figure survives indefinitely after its underlying readings are
-    # moved or deleted — this is exactly what happened to Nyakabale-
-    # Kibibira: its NRWRecord was computed while it temporarily (and
-    # incorrectly) held Karungu's misattributed readings, and once
-    # those were corrected back to Karungu, Nyakabale's
-    # daily_readings became empty but the stale NRWRecord was never
-    # cleared, so the dashboard kept showing a computed NRW% for a
-    # system with zero real readings.
-    current_months = set(monthly.keys())
+    # qualifying readings OR billing data backing it. Without this, a
+    # month's NRW figure survives indefinitely after its underlying
+    # readings are moved or deleted — this is exactly what happened to
+    # Nyakabale-Kibibira: its NRWRecord was computed while it
+    # temporarily (and incorrectly) held Karungu's misattributed
+    # readings, and once those were corrected back to Karungu,
+    # Nyakabale's daily_readings became empty but the stale NRWRecord
+    # was never cleared, so the dashboard kept showing a computed NRW%
+    # for a system with zero real readings. Extended here to also
+    # cover months backed only by billing data, not readings.
     for rec in session.query(NRWRecord).filter_by(system_id=system_id).all():
-        if rec.month not in current_months:
+        if rec.month not in all_months:
             session.delete(rec)
 
     session.commit()
